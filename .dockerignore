@@ -1,0 +1,15 @@
+.git
+.env
+.next
+.vinext
+.wrangler
+dist
+node_modules
+coverage
+outputs
+work
+*.log
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

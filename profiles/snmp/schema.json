@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://monitored.dev/schemas/snmp-profile.json",
+  "title": "Monitored SNMP profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "monitored.io/v1alpha1" },
+    "kind": { "const": "SNMPProfile" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,62}$" },
+        "displayName": { "type": "string" },
+        "vendor": { "type": "string" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["matches", "entities", "sensors"],
+      "properties": {
+        "matches": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sysObjectIDPrefix": { "type": "array", "items": { "type": "string" } },
+            "sysDescrRegex": { "type": "string" }
+          }
+        },
+        "entities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "assetKind", "stableIdentity"],
+            "properties": {
+              "key": { "type": "string" },
+              "assetKind": { "type": "string" },
+              "stableIdentity": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["oid"],
+                  "properties": {
+                    "oid": { "$ref": "#/$defs/oid" },
+                    "indexFrom": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "sensors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "entity", "oid", "name", "category", "unit"],
+            "properties": {
+              "id": { "type": "string" },
+              "entity": { "type": "string" },
+              "oid": { "$ref": "#/$defs/oid" },
+              "name": { "type": "string" },
+              "category": { "type": "string" },
+              "unit": { "type": "string" },
+              "scale": { "type": "number", "default": 1 },
+              "monotonic": { "type": "boolean", "default": false },
+              "enum": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              },
+              "thresholds": {
+                "type": "object",
+                "additionalProperties": { "type": "number" }
+              },
+              "transform": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "multiply": { "type": "number" },
+                  "add": { "type": "number" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "oid": {
+      "type": "string",
+      "pattern": "^\\.?[0-9]+(\\.[0-9]+)+$"
+    }
+  }
+}

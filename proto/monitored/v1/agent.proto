@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package monitored.v1;
+
+option go_package = "github.com/monitored-io/monitored/gen/monitored/v1;monitoredv1";
+
+service AgentControl {
+  rpc Connect(stream AgentEnvelope) returns (stream MasterEnvelope);
+}
+
+message AgentEnvelope {
+  string agent_id = 1;
+  string message_id = 2;
+  int64 sent_at_unix_ms = 3;
+  oneof payload {
+    Registration registration = 10;
+    CapabilityManifest capabilities = 11;
+    AssetSnapshot asset_snapshot = 12;
+    SampleBatch samples = 13;
+    TaskResult task_result = 14;
+    Heartbeat heartbeat = 15;
+    GapReport gap = 16;
+  }
+}
+
+message MasterEnvelope {
+  string message_id = 1;
+  int64 sent_at_unix_ms = 2;
+  oneof payload {
+    DiscoveryTask discovery = 10;
+    DiagnosticTask diagnostic = 11;
+    ApprovedAction action = 12;
+    Acknowledgement acknowledgement = 13;
+  }
+}
+
+message Registration {
+  string stable_host_id = 1;
+  string hostname = 2;
+  string os = 3;
+  string architecture = 4;
+  string version = 5;
+}
+
+message CapabilityManifest {
+  repeated string collectors = 1;
+  repeated string tools = 2;
+  map<string, string> metadata = 3;
+}
+
+message AssetSnapshot {
+  repeated Asset assets = 1;
+  repeated SensorDefinition sensors = 2;
+}
+
+message Asset {
+  string stable_id = 1;
+  string parent_stable_id = 2;
+  string kind = 3;
+  string name = 4;
+  map<string, string> metadata = 5;
+}
+
+message SensorDefinition {
+  string stable_id = 1;
+  string asset_stable_id = 2;
+  string source = 3;
+  string source_path = 4;
+  string raw_name = 5;
+  string category = 6;
+  string unit = 7;
+  double scale = 8;
+  bool monotonic = 9;
+  int32 interval_seconds = 10;
+  map<string, string> metadata = 11;
+}
+
+message SampleBatch {
+  repeated Sample samples = 1;
+}
+
+message Sample {
+  string sensor_stable_id = 1;
+  int64 observed_at_unix_ms = 2;
+  double value = 3;
+  string text_value = 4;
+  string source = 5;
+  string quality = 6;
+  string error = 7;
+}
+
+message DiscoveryTask {
+  string task_id = 1;
+  repeated string collectors = 2;
+}
+
+message DiagnosticTask {
+  string task_id = 1;
+  repeated string commands = 2;
+  int32 timeout_seconds = 3;
+}
+
+message ApprovedAction {
+  string action_id = 1;
+  string immutable_hash = 2;
+  string one_time_token = 3;
+  string command = 4;
+  string working_directory = 5;
+  map<string, string> environment = 6;
+  int32 timeout_seconds = 7;
+}
+
+message TaskResult {
+  string task_id = 1;
+  string status = 2;
+  string structured_json = 3;
+  string stdout_summary = 4;
+  string stderr_summary = 5;
+  string error = 6;
+}
+
+message Heartbeat {
+  int64 wal_bytes = 1;
+  int64 oldest_wal_unix_ms = 2;
+}
+
+message GapReport {
+  int64 from_unix_ms = 1;
+  int64 to_unix_ms = 2;
+  string reason = 3;
+}
+
+message Acknowledgement {
+  string message_id = 1;
+}

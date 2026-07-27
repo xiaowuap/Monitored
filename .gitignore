@@ -1,0 +1,16 @@
+.env
+.env.local
+bin/
+dist/
+coverage/
+node_modules/
+web/dist/
+.vinext/
+.wrangler/
+.next/
+tsconfig.tsbuildinfo
+*.log
+*.db
+*.db-shm
+*.db-wal
+.DS_Store

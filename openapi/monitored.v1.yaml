@@ -1,0 +1,623 @@
+openapi: 3.1.0
+info:
+  title: Monitored API
+  version: 0.1.0
+  description: |
+    REST contract for the device-telemetry-first Monitored control plane.
+    Browser endpoints use the signed `monitored_session` cookie; agents use a
+    dedicated bearer token on the ingest endpoint.
+servers:
+  - url: http://localhost:8080
+    description: Local Compose
+tags:
+  - name: System
+  - name: Auth
+  - name: Inventory
+  - name: Operations
+  - name: Telemetry
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Control plane is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Signed, HttpOnly session cookie issued.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      responses:
+        "204": { description: Session cleared. }
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Current operator.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UserEnvelope"
+                  - type: object
+                    properties:
+                      authDisabled: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/events:
+    get:
+      tags: [Operations]
+      operationId: streamEvents
+      responses:
+        "200":
+          description: Server-sent event stream for telemetry and workflow updates.
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /api/v1/overview:
+    get:
+      tags: [Inventory]
+      operationId: getOverview
+      responses:
+        "200":
+          description: Operational overview.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - generatedAt
+                  - healthScore
+                  - assetCount
+                  - sensorCount
+                  - unknownCount
+                  - firingAlertCount
+                  - pendingActionCount
+                  - ingestRate
+                properties:
+                  generatedAt: { type: string, format: date-time }
+                  healthScore: { type: integer, minimum: 0, maximum: 100 }
+                  assetCount: { type: integer }
+                  onlineAssetCount: { type: integer }
+                  sensorCount: { type: integer }
+                  unknownCount: { type: integer }
+                  firingAlertCount: { type: integer }
+                  pendingActionCount: { type: integer }
+                  ingestRate: { type: integer }
+                  storageStatus: { type: string }
+                  queueStatus: { type: string }
+                  assetsByKind:
+                    type: object
+                    additionalProperties: { type: integer }
+                  temperatureTrend:
+                    type: array
+                    items: { $ref: "#/components/schemas/OverviewPoint" }
+                  recentAlerts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Alert" }
+                  hotAssets:
+                    type: array
+                    items: { $ref: "#/components/schemas/Asset" }
+  /api/v1/assets:
+    get:
+      tags: [Inventory]
+      operationId: listAssets
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Asset inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetList"
+  /api/v1/sensors:
+    get:
+      tags: [Inventory]
+      operationId: listSensors
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [new, present, stale, removed]
+      responses:
+        "200":
+          description: Sensor definitions and latest values.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SensorList"
+  /api/v1/sensors/{id}/metrics:
+    get:
+      tags: [Telemetry]
+      operationId: getSensorMetrics
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+        - name: hours
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 2160, default: 24 }
+      responses:
+        "200":
+          description: Fifteen-minute rollup for the requested range.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, range]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/MetricPoint" }
+                  range:
+                    type: object
+                    properties:
+                      hours: { type: integer }
+  /api/v1/alerts:
+    get:
+      tags: [Operations]
+      operationId: listAlerts
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: active
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Alert instances.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Alert" }
+                  count: { type: integer }
+  /api/v1/incidents:
+    get:
+      tags: [Operations]
+      operationId: listIncidents
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Correlated incidents and diagnosis summaries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+  /api/v1/discovery/runs:
+    get:
+      tags: [Inventory]
+      operationId: listDiscoveryRuns
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Discovery run history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+    post:
+      tags: [Inventory]
+      operationId: createDiscoveryRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                agentId: { type: string }
+                kind: { type: string, enum: [all, local, snmp, redfish, ipmi] }
+      responses:
+        "202":
+          description: Discovery accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/v1/llm/suggestions:
+    get:
+      tags: [Operations]
+      operationId: listLLMSuggestions
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Reviewable semantic suggestions. Raw sensor identity remains immutable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+  /api/v1/llm/suggestions/{id}/decision:
+    post:
+      tags: [Operations]
+      operationId: decideLLMSuggestion
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        $ref: "#/components/requestBodies/SuggestionDecision"
+      responses:
+        "200":
+          description: Suggestion decision recorded and appended to the audit chain.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [Accepted, Rejected] }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/actions:
+    get:
+      tags: [Operations]
+      operationId: listActions
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Approval-gated action requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+  /api/v1/actions/{id}/decision:
+    post:
+      tags: [Operations]
+      operationId: decideAction
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      requestBody:
+        $ref: "#/components/requestBodies/ActionDecision"
+      responses:
+        "200":
+          description: Action decision recorded and appended to the audit chain.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state]
+                properties:
+                  state: { type: string, enum: [approve, reject] }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/audit:
+    get:
+      tags: [Operations]
+      operationId: listAudit
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Hash-chained audit history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+  /api/v1/ingest:
+    post:
+      tags: [Telemetry]
+      operationId: ingestTelemetry
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IngestBatch"
+      responses:
+        "202":
+          description: Batch accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, at]
+                properties:
+                  accepted: { type: integer }
+                  at: { type: string, format: date-time }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Cardinality or relational validation failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: monitored_session
+    agentToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-agent-token
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000 }
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  requestBodies:
+    SuggestionDecision:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [decision]
+            properties:
+              decision: { type: string, enum: [Accepted, Rejected] }
+    ActionDecision:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [decision]
+            properties:
+              decision: { type: string, enum: [approve, reject] }
+  responses:
+    Unauthorized:
+      description: Authentication failed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource was not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Resource has already been reviewed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ServiceUnavailable:
+      description: A required dependency is unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Health:
+      type: object
+      required: [status, database]
+      properties:
+        status: { type: string, enum: [healthy, degraded] }
+        database: { type: string }
+        redis: { type: string }
+        time: { type: string, format: date-time }
+    UserEnvelope:
+      type: object
+      required: [user]
+      properties:
+        user:
+          type: object
+          required: [email, role]
+          properties:
+            email: { type: string, format: email }
+            role: { type: string }
+    Asset:
+      type: object
+      required: [id, stableId, kind, name, health, connection, lastSeenAt, summary]
+      properties:
+        id: { type: string, format: uuid }
+        stableId: { type: string }
+        parentId: { type: [string, "null"], format: uuid }
+        kind: { type: string }
+        name: { type: string }
+        vendor: { type: string }
+        model: { type: string }
+        health: { type: string, enum: [healthy, warning, critical, unknown] }
+        connection: { type: string, enum: [online, offline, unknown] }
+        lastSeenAt: { type: string, format: date-time }
+        metadata: { type: object, additionalProperties: true }
+        summary: { type: object, additionalProperties: true }
+    Sensor:
+      type: object
+      required: [id, stableId, assetId, rawName, category, unit, discoveryStatus, quality]
+      properties:
+        id: { type: string, format: uuid }
+        stableId: { type: string }
+        assetId: { type: string, format: uuid }
+        assetName: { type: string }
+        source: { type: string }
+        sourcePath: { type: string }
+        rawName: { type: string }
+        displayAlias: { type: [string, "null"] }
+        category: { type: string }
+        unit: { type: string }
+        scale: { type: number }
+        monotonic: { type: boolean }
+        discoveryStatus: { type: string }
+        quality: { type: string }
+        currentValue: { type: [number, "null"] }
+        currentText: { type: [string, "null"] }
+        observedAt: { type: [string, "null"], format: date-time }
+        metadata: { type: object, additionalProperties: true }
+    Alert:
+      type: object
+      required: [id, fingerprint, ruleName, assetId, severity, state, summary, startedAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        fingerprint: { type: string }
+        ruleName: { type: string }
+        assetId: { type: string, format: uuid }
+        assetName: { type: string }
+        sensorId: { type: [string, "null"], format: uuid }
+        severity: { type: string }
+        state: { type: string }
+        summary: { type: string }
+        value: { type: [number, "null"] }
+        unit: { type: string }
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        resolvedAt: { type: [string, "null"], format: date-time }
+    MetricPoint:
+      type: object
+      required: [at, min, avg, max, count]
+      properties:
+        at: { type: string, format: date-time }
+        min: { type: number }
+        avg: { type: number }
+        max: { type: number }
+        count: { type: integer }
+    OverviewPoint:
+      type: object
+      properties:
+        at: { type: string, format: date-time }
+        average: { type: number }
+        maximum: { type: number }
+        powerW: { type: number }
+    AssetList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Asset" }
+        count: { type: integer }
+    SensorList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Sensor" }
+        count: { type: integer }
+    GenericList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { type: object, additionalProperties: true }
+        count: { type: integer }
+    IngestAsset:
+      type: object
+      additionalProperties: false
+      required: [stableId, kind, name]
+      properties:
+        stableId: { type: string }
+        parentStableId: { type: string }
+        kind: { type: string }
+        name: { type: string }
+        vendor: { type: string }
+        model: { type: string }
+        metadata: { type: object, additionalProperties: true }
+    IngestSensor:
+      type: object
+      additionalProperties: false
+      required: [stableId, assetStableId, source, sourcePath, rawName, category, unit]
+      properties:
+        stableId: { type: string }
+        assetStableId: { type: string }
+        source: { type: string }
+        sourcePath: { type: string }
+        rawName: { type: string }
+        category: { type: string }
+        unit: { type: string }
+        scale: { type: number, default: 1 }
+        monotonic: { type: boolean }
+        intervalSeconds: { type: integer }
+        quality: { type: string }
+        metadata: { type: object, additionalProperties: true }
+    IngestSample:
+      type: object
+      additionalProperties: false
+      required: [sensorStableId, observedAt]
+      properties:
+        sensorStableId: { type: string }
+        observedAt: { type: string, format: date-time }
+        value: { type: number }
+        textValue: { type: string }
+        source: { type: string }
+        quality: { type: string }
+        error: { type: string }
+    IngestBatch:
+      type: object
+      additionalProperties: false
+      required: [agentId, assets, sensors, samples]
+      properties:
+        agentId: { type: string }
+        assets:
+          type: array
+          maxItems: 500
+          items: { $ref: "#/components/schemas/IngestAsset" }
+        sensors:
+          type: array
+          maxItems: 5000
+          items: { $ref: "#/components/schemas/IngestSensor" }
+        samples:
+          type: array
+          maxItems: 20000
+          items: { $ref: "#/components/schemas/IngestSample" }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+security:
+  - session: []

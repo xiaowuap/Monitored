@@ -1,0 +1,30 @@
+apiVersion: monitored.io/v1alpha1
+kind: SNMPProfile
+metadata:
+  name: standard-ups
+  displayName: Standard UPS-MIB
+spec:
+  matches:
+    sysObjectIDPrefix:
+      - "1.3.6.1.2.1.33"
+  entities:
+    - key: ups
+      assetKind: ups
+      stableIdentity:
+        - oid: "1.3.6.1.2.1.33.1.1.2.0"
+  sensors:
+    - id: battery-charge
+      entity: ups
+      oid: "1.3.6.1.2.1.33.1.2.4.0"
+      name: Battery charge
+      category: capacity
+      unit: "%"
+      scale: 1
+    - id: battery-runtime
+      entity: ups
+      oid: "1.3.6.1.2.1.33.1.2.3.0"
+      name: Estimated runtime
+      category: time
+      unit: s
+      transform:
+        multiply: 60
