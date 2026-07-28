@@ -1,0 +1,380 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/monitored-io/monitored/internal/domain"
+)
+
+func (r *Repository) RegisterAgent(ctx context.Context, agent domain.Agent) error {
+	capabilities, err := json.Marshal(agent.Capabilities)
+	if err != nil {
+		return err
+	}
+	tools, err := json.Marshal(agent.Tools)
+	if err != nil {
+		return err
+	}
+	metadata, err := json.Marshal(agent.Metadata)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO agents (
+			id, stable_host_id, hostname, os, architecture, version, state,
+			certificate_id, capabilities, tools, metadata, last_seen_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, 'online', $7, $8::jsonb, $9::jsonb, $10::jsonb, now())
+		ON CONFLICT (id) DO UPDATE SET
+			stable_host_id = EXCLUDED.stable_host_id,
+			hostname = EXCLUDED.hostname,
+			os = EXCLUDED.os,
+			architecture = EXCLUDED.architecture,
+			version = EXCLUDED.version,
+			state = CASE WHEN agents.state = 'revoked' THEN 'revoked' ELSE 'online' END,
+			certificate_id = EXCLUDED.certificate_id,
+			capabilities = EXCLUDED.capabilities,
+			tools = EXCLUDED.tools,
+			metadata = agents.metadata || EXCLUDED.metadata,
+			last_seen_at = now()`,
+		agent.ID, agent.StableHostID, agent.Hostname, agent.OS, agent.Architecture,
+		agent.Version, agent.CertificateID, capabilities, tools, metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("register agent: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) UpdateAgentCapabilities(ctx context.Context, agentID string, capabilities, tools []string, metadata map[string]any) error {
+	capabilityJSON, _ := json.Marshal(capabilities)
+	toolJSON, _ := json.Marshal(tools)
+	metadataJSON, _ := json.Marshal(metadata)
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE agents SET capabilities = $2::jsonb, tools = $3::jsonb,
+			metadata = metadata || $4::jsonb, last_seen_at = now()
+		WHERE id = $1 AND state <> 'revoked'`,
+		agentID, capabilityJSON, toolJSON, metadataJSON,
+	)
+	if err != nil {
+		return fmt.Errorf("update agent capabilities: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) AgentHeartbeat(ctx context.Context, agentID string, walBytes int64, oldest *time.Time) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE agents SET state = 'online', last_seen_at = now(), wal_bytes = $2, oldest_wal_at = $3
+		WHERE id = $1 AND state <> 'revoked'`, agentID, walBytes, oldest)
+	if err != nil {
+		return fmt.Errorf("agent heartbeat: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) RecordAgentGap(ctx context.Context, agentID string, from, to time.Time, reason string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE agents SET state = 'degraded', last_seen_at = now(),
+			last_gap_from = $2, last_gap_to = $3, last_gap_reason = $4
+		WHERE id = $1 AND state <> 'revoked'`, agentID, from, to, reason)
+	if err != nil {
+		return fmt.Errorf("record agent gap: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return r.AppendAudit(ctx, agentID, "agent.gap_reported", "agent", agentID, "", map[string]any{
+		"from": from, "to": to, "reason": reason,
+	})
+}
+
+func (r *Repository) ListAgents(ctx context.Context, limit int) ([]domain.Agent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 250
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, stable_host_id, hostname, os, architecture, version,
+			CASE WHEN state <> 'revoked' AND last_seen_at < now() - interval '2 minutes' THEN 'offline' ELSE state END,
+			certificate_id, capabilities, tools, metadata, last_seen_at, wal_bytes,
+			oldest_wal_at, last_gap_from, last_gap_to, last_gap_reason, registered_at
+		FROM agents ORDER BY last_seen_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.Agent
+	for rows.Next() {
+		var item domain.Agent
+		var capabilities, tools, metadata []byte
+		if err := rows.Scan(
+			&item.ID, &item.StableHostID, &item.Hostname, &item.OS, &item.Architecture,
+			&item.Version, &item.State, &item.CertificateID, &capabilities, &tools, &metadata,
+			&item.LastSeenAt, &item.WALBytes, &item.OldestWALAt, &item.LastGapFrom,
+			&item.LastGapTo, &item.LastGapReason, &item.RegisteredAt,
+		); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(capabilities, &item.Capabilities)
+		_ = json.Unmarshal(tools, &item.Tools)
+		item.Metadata = domain.JSONMap(metadata)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) NextAgentTasks(ctx context.Context, agentID string, limit int) ([]domain.AgentTask, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 10
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `
+		WITH selected AS (
+			SELECT id, payload FROM agent_tasks
+			WHERE agent_id = $1 AND state = 'queued'
+			  AND not_before <= now() AND expires_at > now()
+			ORDER BY created_at
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE agent_tasks task
+		SET state = 'dispatched', dispatched_at = now(), attempt = attempt + 1,
+			payload = task.payload - 'oneTimeToken'
+		FROM selected
+		WHERE task.id = selected.id
+		RETURNING task.id::text, task.agent_id, task.kind, task.state, selected.payload,
+			task.immutable_hash, task.attempt, task.not_before, task.expires_at,
+			task.dispatched_at, task.acknowledged_at, task.finished_at, task.result, task.created_at`,
+		agentID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var tasks []domain.AgentTask
+	for rows.Next() {
+		var task domain.AgentTask
+		var payload, result []byte
+		if err := rows.Scan(
+			&task.ID, &task.AgentID, &task.Kind, &task.State, &payload, &task.ImmutableHash,
+			&task.Attempt, &task.NotBefore, &task.ExpiresAt, &task.DispatchedAt,
+			&task.AcknowledgedAt, &task.FinishedAt, &result, &task.CreatedAt,
+		); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		task.Payload, task.Result = domain.JSONMap(payload), domain.JSONMap(result)
+		tasks = append(tasks, task)
+	}
+	rows.Close()
+	for _, task := range tasks {
+		if task.Kind == "discovery" {
+			runID, _ := task.Payload["runId"].(string)
+			if runID == "" {
+				return nil, errors.New("discovery task is missing its run identity")
+			}
+			if _, err := tx.Exec(ctx, `
+				UPDATE discovery_runs
+				SET state = 'running', progress = 10,
+					details = jsonb_build_object('phase', 'collecting', 'taskId', $2::text)
+				WHERE id = $1::uuid AND state = 'queued'`, runID, task.ID); err != nil {
+				return nil, fmt.Errorf("mark discovery running: %w", err)
+			}
+		}
+		if task.Kind != "action" {
+			continue
+		}
+		actionRequestID, _ := task.Payload["actionRequestId"].(string)
+		oneTimeToken, _ := task.Payload["oneTimeToken"].(string)
+		if actionRequestID == "" || oneTimeToken == "" {
+			return nil, errors.New("approved action task is missing its request identity or execution token")
+		}
+		var expectedHash string
+		if err := tx.QueryRow(ctx, `
+			SELECT one_time_token_hash
+			FROM action_requests
+			WHERE id = $1::uuid AND state = 'approved'
+			  AND execution_token_expires_at > now()
+			FOR UPDATE`, actionRequestID).Scan(&expectedHash); err != nil {
+			return nil, fmt.Errorf("validate approved action token: %w", err)
+		}
+		actualHash := fmt.Sprintf("%x", sha256.Sum256([]byte(oneTimeToken)))
+		if subtle.ConstantTimeCompare([]byte(actualHash), []byte(expectedHash)) != 1 {
+			return nil, errors.New("approved action token hash does not match")
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE action_requests
+			SET state = 'running'
+			WHERE id = $1::uuid AND state = 'approved'`, actionRequestID); err != nil {
+			return nil, fmt.Errorf("mark action running: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func (r *Repository) CompleteAgentTask(ctx context.Context, agentID, taskID, status string, result map[string]any) error {
+	if status != "succeeded" && status != "failed" {
+		return errors.New("task result status must be succeeded or failed")
+	}
+	resultJSON, _ := json.Marshal(result)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var kind string
+	var payloadJSON []byte
+	err = tx.QueryRow(ctx, `
+		UPDATE agent_tasks SET state = $3, acknowledged_at = COALESCE(acknowledged_at, now()),
+			finished_at = now(), result = $4::jsonb
+		WHERE id = $2::uuid AND agent_id = $1 AND state IN ('dispatched', 'acknowledged')
+		RETURNING kind, payload`,
+		agentID, taskID, status, resultJSON,
+	).Scan(&kind, &payloadJSON)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
+		return fmt.Errorf("complete agent task: %w", err)
+	}
+	if kind == "action" {
+		var payload map[string]any
+		if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+			return fmt.Errorf("decode completed action task: %w", err)
+		}
+		actionRequestID, _ := payload["actionRequestId"].(string)
+		if actionRequestID == "" {
+			return errors.New("completed action task is missing its request identity")
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE action_requests
+			SET state = $2, result = $3::jsonb, one_time_token_hash = NULL,
+				execution_token_expires_at = NULL
+			WHERE id = $1::uuid AND state = 'running'`,
+			actionRequestID, status, resultJSON,
+		)
+		if err != nil {
+			return fmt.Errorf("complete action request: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrConflict
+		}
+		if err := appendAuditTx(ctx, tx, "agent:"+agentID, "action."+status, "action_request", actionRequestID, "", map[string]any{
+			"taskId": taskID,
+		}); err != nil {
+			return err
+		}
+	}
+	if kind == "discovery" {
+		var payload map[string]any
+		if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+			return fmt.Errorf("decode discovery task payload: %w", err)
+		}
+		runID, _ := payload["runId"].(string)
+		if runID == "" {
+			return errors.New("completed discovery task is missing its run identity")
+		}
+		structured := map[string]any{}
+		if raw, ok := result["structured"].(string); ok && raw != "" {
+			_ = json.Unmarshal([]byte(raw), &structured)
+		}
+		assetsFound := integerFromJSON(structured["assets"])
+		sensorsFound := integerFromJSON(structured["sensors"])
+		unknownFound := integerFromJSON(structured["unknown"])
+		tag, err := tx.Exec(ctx, `
+			UPDATE discovery_runs
+			SET state = $2, progress = 100, finished_at = now(),
+				assets_found = $3, sensors_found = $4, unknown_found = $5,
+				details = $6::jsonb
+			WHERE id = $1::uuid AND state IN ('queued', 'running')`,
+			runID, status, assetsFound, sensorsFound, unknownFound, resultJSON,
+		)
+		if err != nil {
+			return fmt.Errorf("complete discovery run: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrConflict
+		}
+		if err := appendAuditTx(ctx, tx, "agent:"+agentID, "discovery."+status, "discovery_run", runID, "", map[string]any{
+			"taskId": taskID, "assets": assetsFound, "sensors": sensorsFound,
+			"unknown": unknownFound,
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func integerFromJSON(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
+}
+
+func (r *Repository) ApplyDiscoverySnapshot(ctx context.Context, runID, agentID string, batch domain.IngestBatch) error {
+	if err := r.Ingest(ctx, batch); err != nil {
+		return err
+	}
+	observed := make([]string, 0, len(batch.Sensors))
+	for _, sensor := range batch.Sensors {
+		observed = append(observed, sensor.StableID)
+	}
+	observedJSON, _ := json.Marshal(observed)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO discovery_snapshots (run_id, agent_id, observed_stable_ids)
+		VALUES (NULLIF($1, '')::uuid, $2, $3::jsonb)`, runID, agentID, observedJSON); err != nil {
+		return fmt.Errorf("store discovery snapshot: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		WITH observed AS (
+			SELECT jsonb_array_elements_text($2::jsonb) stable_id
+		)
+		UPDATE sensor_definitions sensor
+		SET missing_discoveries = missing_discoveries + 1,
+			discovery_status = CASE
+				WHEN missing_discoveries + 1 >= 6 THEN 'removed'
+				WHEN missing_discoveries + 1 >= 3 THEN 'stale'
+				ELSE discovery_status
+			END,
+			updated_at = now()
+		FROM assets asset
+		WHERE sensor.asset_id = asset.id
+		  AND asset.metadata->>'agentId' = $1
+		  AND NOT EXISTS (SELECT 1 FROM observed WHERE observed.stable_id = sensor.stable_id)`,
+		agentID, observedJSON,
+	); err != nil {
+		return fmt.Errorf("advance discovery lifecycle: %w", err)
+	}
+	return tx.Commit(ctx)
+}

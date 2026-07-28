@@ -132,23 +132,25 @@ type LLMSuggestion struct {
 }
 
 type ActionRequest struct {
-	ID               string         `json:"id"`
-	AssetID          string         `json:"assetId"`
-	AssetName        string         `json:"assetName"`
-	Kind             string         `json:"kind"`
-	Title            string         `json:"title"`
-	Command          string         `json:"command"`
-	WorkingDirectory string         `json:"workingDirectory"`
-	Identity         string         `json:"identity"`
-	TimeoutSeconds   int            `json:"timeoutSeconds"`
-	Risk             string         `json:"risk"`
-	State            string         `json:"state"`
-	ImmutableHash    string         `json:"immutableHash"`
-	RequestedBy      string         `json:"requestedBy"`
-	RequestedAt      time.Time      `json:"requestedAt"`
-	ApprovedBy       *string        `json:"approvedBy,omitempty"`
-	ApprovedAt       *time.Time     `json:"approvedAt,omitempty"`
-	Result           map[string]any `json:"result,omitempty"`
+	ID               string            `json:"id"`
+	AgentID          string            `json:"agentId,omitempty"`
+	AssetID          string            `json:"assetId"`
+	AssetName        string            `json:"assetName"`
+	Kind             string            `json:"kind"`
+	Title            string            `json:"title"`
+	Command          string            `json:"command"`
+	WorkingDirectory string            `json:"workingDirectory"`
+	Identity         string            `json:"identity"`
+	TimeoutSeconds   int               `json:"timeoutSeconds"`
+	Risk             string            `json:"risk"`
+	State            string            `json:"state"`
+	ImmutableHash    string            `json:"immutableHash"`
+	RequestedBy      string            `json:"requestedBy"`
+	RequestedAt      time.Time         `json:"requestedAt"`
+	ApprovedBy       *string           `json:"approvedBy,omitempty"`
+	ApprovedAt       *time.Time        `json:"approvedAt,omitempty"`
+	Result           map[string]any    `json:"result,omitempty"`
+	Environment      map[string]string `json:"environment,omitempty"`
 }
 
 type AuditEntry struct {

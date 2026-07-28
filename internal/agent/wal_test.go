@@ -77,4 +77,11 @@ func TestWALAppendPrunesEntriesOlderThanRetention(t *testing.T) {
 	if err != nil || replayed != 1 || len(replayedIDs) != 1 || replayedIDs[0] != "fresh" {
 		t.Fatalf("replayed=%d ids=%v err=%v", replayed, replayedIDs, err)
 	}
+	gap, err := wal.Gap()
+	if err != nil || gap.From.IsZero() || gap.Reason == "" {
+		t.Fatalf("expired WAL must produce a reportable gap: %#v, %v", gap, err)
+	}
+	if err := wal.ClearGap(); err != nil {
+		t.Fatal(err)
+	}
 }

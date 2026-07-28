@@ -1,0 +1,82 @@
+apiVersion: monitored.io/v1alpha1
+kind: SNMPProfile
+metadata:
+  name: standard-device-mibs
+  displayName: Standard SNMP device
+  vendor: IETF
+spec:
+  matches: {}
+  entities:
+    - key: device
+      assetKind: snmp
+      stableIdentity:
+        - oid: "1.3.6.1.2.1.1.2.0"
+  sensors:
+    - id: if-oper-status
+      entity: device
+      oid: "1.3.6.1.2.1.2.2.1.8"
+      name: IF-MIB ifOperStatus
+      category: link_status
+      unit: "1"
+      enum:
+        "1": up
+        "2": down
+        "3": testing
+        "4": unknown
+        "5": dormant
+        "6": notPresent
+        "7": lowerLayerDown
+    - id: if-in-octets
+      entity: device
+      oid: "1.3.6.1.2.1.2.2.1.10"
+      name: IF-MIB ifInOctets
+      category: throughput
+      unit: By
+      monotonic: true
+    - id: if-out-octets
+      entity: device
+      oid: "1.3.6.1.2.1.2.2.1.16"
+      name: IF-MIB ifOutOctets
+      category: throughput
+      unit: By
+      monotonic: true
+    - id: if-in-errors
+      entity: device
+      oid: "1.3.6.1.2.1.2.2.1.14"
+      name: IF-MIB ifInErrors
+      category: error_count
+      unit: "1"
+      monotonic: true
+    - id: entity-sensor-value
+      entity: device
+      oid: "1.3.6.1.2.1.99.1.1.1.4"
+      name: ENTITY-SENSOR-MIB entPhySensorValue
+      category: unknown
+      unit: "1"
+    - id: host-memory-size
+      entity: device
+      oid: "1.3.6.1.2.1.25.2.2.0"
+      name: HOST-RESOURCES-MIB hrMemorySize
+      category: capacity
+      unit: By
+      transform:
+        multiply: 1024
+    - id: ups-battery-status
+      entity: device
+      oid: "1.3.6.1.2.1.33.1.2.1.0"
+      name: UPS-MIB upsBatteryStatus
+      category: health_status
+      unit: "1"
+    - id: ups-battery-charge
+      entity: device
+      oid: "1.3.6.1.2.1.33.1.2.4.0"
+      name: UPS-MIB upsEstimatedChargeRemaining
+      category: capacity
+      unit: "%"
+    - id: lldp-last-change
+      entity: device
+      oid: "1.0.8802.1.1.2.1.0"
+      name: LLDP-MIB remote tables last change
+      category: time
+      unit: "s"
+      monotonic: true

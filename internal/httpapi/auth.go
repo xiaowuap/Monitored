@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,6 +13,9 @@ import (
 	"time"
 
 	"github.com/monitored-io/monitored/internal/config"
+	"github.com/monitored-io/monitored/internal/security"
+	"github.com/monitored-io/monitored/internal/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type identity struct {
@@ -21,21 +25,28 @@ type identity struct {
 }
 
 type authenticator struct {
-	disabled bool
-	email    string
-	password string
-	key      []byte
-	secure   bool
+	disabled   bool
+	email      string
+	password   string
+	key        []byte
+	secure     bool
+	repository *store.Repository
+	sealer     *security.Sealer
 }
 
-func newAuthenticator(cfg config.Server) *authenticator {
-	return &authenticator{
+func newAuthenticator(cfg config.Server, repositories ...*store.Repository) *authenticator {
+	result := &authenticator{
 		disabled: cfg.AuthDisabled,
 		email:    cfg.AdminEmail,
 		password: cfg.AdminPassword,
 		key:      []byte(cfg.MasterKey),
 		secure:   strings.HasPrefix(cfg.PublicURL, "https://"),
 	}
+	if len(repositories) > 0 {
+		result.repository = repositories[0]
+	}
+	result.sealer, _ = security.NewSealer(cfg.MasterKey)
+	return result
 }
 
 func (a *authenticator) middleware(next http.Handler) http.Handler {
@@ -62,23 +73,62 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 	})
 }
 
+func requireRole(roles ...string) func(http.Handler) http.Handler {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		allowed[role] = struct{}{}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := allowed[actorFrom(r).Role]; !ok {
+				writeError(w, http.StatusForbidden, "insufficient_role", "This operation is not allowed for the current role.")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func (a *authenticator) login(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		TOTPCode string `json:"totpCode"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	emailMatch := subtle.ConstantTimeCompare([]byte(strings.ToLower(payload.Email)), []byte(strings.ToLower(a.email)))
-	passwordMatch := subtle.ConstantTimeCompare([]byte(payload.Password), []byte(a.password))
-	if emailMatch != 1 || passwordMatch != 1 {
+	role := "admin"
+	authenticated := false
+	usedRepository := false
+	if a.repository != nil {
+		hash, storedRole, enabled, err := a.repository.UserCredential(r.Context(), payload.Email)
+		if err == nil {
+			usedRepository = true
+			if enabled && bcrypt.CompareHashAndPassword([]byte(hash), []byte(payload.Password)) == nil {
+				authenticated, role = true, storedRole
+			}
+		}
+	}
+	if !usedRepository && !authenticated {
+		authenticated = subtle.ConstantTimeCompare([]byte(strings.ToLower(payload.Email)), []byte(strings.ToLower(a.email))) == 1 &&
+			subtle.ConstantTimeCompare([]byte(payload.Password), []byte(a.password)) == 1
+	}
+	if !authenticated {
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials", "The email or password is incorrect.")
 		return
 	}
-	claims := identity{Email: a.email, Role: "admin", Exp: time.Now().Add(12 * time.Hour).Unix()}
+	if usedRepository {
+		valid, required := a.validateTOTP(r.Context(), payload.Email, payload.TOTPCode)
+		if required && !valid {
+			time.Sleep(250 * time.Millisecond)
+			writeError(w, http.StatusUnauthorized, "totp_required", "A valid authenticator code is required.")
+			return
+		}
+	}
+	claims := identity{Email: strings.ToLower(payload.Email), Role: role, Exp: time.Now().Add(12 * time.Hour).Unix()}
 	token, err := a.sign(claims)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "token_error", "Unable to create a session.")
@@ -96,6 +146,36 @@ func (a *authenticator) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user": map[string]string{"email": claims.Email, "role": claims.Role},
 	})
+}
+
+func (a *authenticator) validateTOTP(ctx context.Context, email, code string) (valid, required bool) {
+	if a.repository == nil {
+		return false, false
+	}
+	encrypted, enabled, err := a.repository.UserTOTPSecret(ctx, email)
+	if err != nil || !enabled {
+		return false, false
+	}
+	if a.sealer == nil {
+		return false, true
+	}
+	secret, err := a.sealer.Open(encrypted, "totp:"+strings.ToLower(email))
+	if err != nil {
+		return false, true
+	}
+	return security.ValidateTOTP(string(secret), code, time.Now()), true
+}
+
+func (a *authenticator) reauthenticate(ctx context.Context, email, password, code string) bool {
+	if a.repository == nil || a.sealer == nil {
+		return false
+	}
+	hash, _, enabled, err := a.repository.UserCredential(ctx, email)
+	if err != nil || !enabled || bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
+		return false
+	}
+	valid, required := a.validateTOTP(ctx, email, code)
+	return required && valid
 }
 
 func (a *authenticator) logout(w http.ResponseWriter, _ *http.Request) {

@@ -26,6 +26,10 @@ func (r *Repository) Ingest(ctx context.Context, batch domain.IngestBatch) error
 
 	assetIDs := make(map[string]string, len(batch.Assets))
 	for _, asset := range batch.Assets {
+		if asset.Metadata == nil {
+			asset.Metadata = make(map[string]any)
+		}
+		asset.Metadata["agentId"] = batch.AgentID
 		metadata, marshalErr := json.Marshal(asset.Metadata)
 		if marshalErr != nil {
 			return fmt.Errorf("encode asset metadata: %w", marshalErr)
@@ -194,7 +198,10 @@ func (r *Repository) Ingest(ctx context.Context, batch domain.IngestBatch) error
 	}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return r.EvaluateRules(ctx, time.Now().UTC())
 }
 
 func (r *Repository) RunMaintenance(ctx context.Context) error {
@@ -267,6 +274,32 @@ func (r *Repository) RunMaintenance(ctx context.Context) error {
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM metric_1h WHERE bucket < now() - interval '2 years'`); err != nil {
 		return fmt.Errorf("expire 1h metrics: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		WITH expired AS (
+			UPDATE agent_tasks
+			SET state = 'expired', finished_at = now(),
+				result = jsonb_build_object('error', 'task expired before completion')
+			WHERE state IN ('queued', 'dispatched', 'acknowledged')
+			  AND expires_at <= now()
+			RETURNING kind, payload
+		)
+		UPDATE discovery_runs run
+		SET state = 'failed', progress = 100, finished_at = now(),
+			details = jsonb_build_object('error', 'Agent discovery task expired')
+		FROM expired
+		WHERE expired.kind = 'discovery'
+		  AND run.id = NULLIF(expired.payload->>'runId', '')::uuid
+		  AND run.state IN ('queued', 'running')`); err != nil {
+		return fmt.Errorf("expire agent tasks: %w", err)
+	}
+	if _, err = tx.Exec(ctx, `
+		UPDATE action_requests request
+		SET state = 'expired', one_time_token_hash = NULL,
+			execution_token_expires_at = NULL
+		WHERE state = 'approved'
+		  AND execution_token_expires_at <= now()`); err != nil {
+		return fmt.Errorf("expire approved actions: %w", err)
 	}
 	return tx.Commit(ctx)
 }

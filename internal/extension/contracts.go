@@ -51,6 +51,7 @@ type DiagnosisRequest struct {
 	Assets   []domain.Asset
 	Alerts   []domain.Alert
 	Metrics  map[string][]domain.MetricPoint
+	Context  map[string]any
 }
 
 type Diagnosis struct {
@@ -58,6 +59,22 @@ type Diagnosis struct {
 	Evidence   []string
 	Confidence float64
 	Model      string
+}
+
+type LabelSuggestionRequest struct {
+	Sensor   domain.Sensor
+	Asset    domain.Asset
+	Adjacent []domain.Sensor
+	Context  map[string]any
+}
+
+type LabelSuggestion struct {
+	DisplayName string
+	AssetKind   string
+	Category    string
+	Unit        string
+	Confidence  float64
+	Evidence    []string
 }
 
 type LLMProvider interface {

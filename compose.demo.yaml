@@ -1,0 +1,14 @@
+name: monitored-demo
+
+services:
+  demo:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_BASE: ""
+        NEXT_PUBLIC_MONITORED_MODE: demo
+        NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH: ${NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH:-false}
+    ports:
+      - "${MONITORED_DEMO_PORT:-3000}:3000"
+    restart: unless-stopped

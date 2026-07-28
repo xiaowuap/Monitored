@@ -59,6 +59,8 @@ message Asset {
   string kind = 3;
   string name = 4;
   map<string, string> metadata = 5;
+  string vendor = 6;
+  string model = 7;
 }
 
 message SensorDefinition {
@@ -73,6 +75,7 @@ message SensorDefinition {
   bool monotonic = 9;
   int32 interval_seconds = 10;
   map<string, string> metadata = 11;
+  string quality = 12;
 }
 
 message SampleBatch {
@@ -82,8 +85,8 @@ message SampleBatch {
 message Sample {
   string sensor_stable_id = 1;
   int64 observed_at_unix_ms = 2;
-  double value = 3;
-  string text_value = 4;
+  optional double value = 3;
+  optional string text_value = 4;
   string source = 5;
   string quality = 6;
   string error = 7;
@@ -92,6 +95,17 @@ message Sample {
 message DiscoveryTask {
   string task_id = 1;
   repeated string collectors = 2;
+  string cidr = 3;
+  repeated string scan_protocols = 4;
+  repeated ScanPorts scan_ports = 5;
+  bool confirm_large = 6;
+  int32 rate_per_second = 7;
+  int32 concurrency = 8;
+}
+
+message ScanPorts {
+  string protocol = 1;
+  repeated uint32 ports = 2;
 }
 
 message DiagnosticTask {
@@ -108,6 +122,9 @@ message ApprovedAction {
   string working_directory = 5;
   map<string, string> environment = 6;
   int32 timeout_seconds = 7;
+  string identity = 8;
+  string risk = 9;
+  string asset_id = 10;
 }
 
 message TaskResult {

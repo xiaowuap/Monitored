@@ -1,0 +1,26 @@
+services:
+  server:
+    group_add: ["0"]
+    environment:
+      MONITORED_GRPC_INSECURE: "false"
+      MONITORED_GRPC_CERT_FILE: /run/monitored-pki/server.crt
+      MONITORED_GRPC_KEY_FILE: /run/monitored-pki/server.key
+      MONITORED_GRPC_CLIENT_CA_FILE: /run/monitored-pki/ca.crt
+    volumes:
+      - ./secrets/pki/ca.crt:/run/monitored-pki/ca.crt:ro
+      - ./secrets/pki/server.crt:/run/monitored-pki/server.crt:ro
+      - ./secrets/pki/server.key:/run/monitored-pki/server.key:ro
+
+  local-agent:
+    group_add: ["0"]
+    environment:
+      MONITORED_AGENT_NAME: local-agent
+      MONITORED_AGENT_GRPC_INSECURE: "false"
+      MONITORED_AGENT_TLS_CERT_FILE: /run/monitored-pki/local-agent.crt
+      MONITORED_AGENT_TLS_KEY_FILE: /run/monitored-pki/local-agent.key
+      MONITORED_AGENT_TLS_CA_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_TLS_SERVER_NAME: server
+    volumes:
+      - ./secrets/pki/ca.crt:/run/monitored-pki/ca.crt:ro
+      - ./secrets/pki/local-agent.crt:/run/monitored-pki/local-agent.crt:ro
+      - ./secrets/pki/local-agent.key:/run/monitored-pki/local-agent.key:ro

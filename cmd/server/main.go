@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,11 +12,29 @@ import (
 	"time"
 
 	"github.com/monitored-io/monitored/internal/config"
+	"github.com/monitored-io/monitored/internal/grpcapi"
 	"github.com/monitored-io/monitored/internal/httpapi"
 	"github.com/monitored-io/monitored/internal/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--healthcheck" {
+		address := os.Getenv("MONITORED_HTTP_ADDR")
+		if address == "" {
+			address = ":8080"
+		}
+		_, port, splitErr := net.SplitHostPort(address)
+		if splitErr != nil {
+			os.Exit(1)
+		}
+		response, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://127.0.0.1:" + port + "/healthz")
+		if err != nil || response.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		_ = response.Body.Close()
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg := config.ServerFromEnvironment()
 
@@ -34,6 +53,19 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(cfg.AdminPassword), 12)
+	if err != nil {
+		cancelStartup()
+		repository.Close()
+		logger.Error("hash bootstrap administrator password", "error", err)
+		os.Exit(1)
+	}
+	if err := repository.EnsureBootstrapUser(startupContext, cfg.AdminEmail, string(passwordHash)); err != nil {
+		cancelStartup()
+		repository.Close()
+		logger.Error("ensure bootstrap administrator", "error", err)
+		os.Exit(1)
+	}
 	cancelStartup()
 	defer repository.Close()
 
@@ -44,6 +76,30 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      90 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+	var grpcServer interface {
+		GracefulStop()
+		Stop()
+	}
+	if cfg.GRPCAddr != "" {
+		listener, listenErr := net.Listen("tcp", cfg.GRPCAddr)
+		if listenErr != nil {
+			logger.Error("listen for Agent gRPC", "error", listenErr)
+			os.Exit(1)
+		}
+		service := grpcapi.New(repository, cfg.GRPCInsecure)
+		rpcServer, createErr := grpcapi.NewServer(service, cfg.GRPCCertFile, cfg.GRPCKeyFile, cfg.GRPCClientCA, cfg.GRPCInsecure)
+		if createErr != nil {
+			logger.Error("configure Agent gRPC", "error", createErr)
+			os.Exit(1)
+		}
+		grpcServer = rpcServer
+		go func() {
+			logger.Info("Monitored Agent gRPC listening", "address", cfg.GRPCAddr, "mTLS", !cfg.GRPCInsecure)
+			if serveErr := rpcServer.Serve(listener); serveErr != nil {
+				logger.Error("serve Agent gRPC", "error", serveErr)
+			}
+		}()
 	}
 
 	go func() {
@@ -57,6 +113,18 @@ func main() {
 	signalContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	<-signalContext.Done()
+	if grpcServer != nil {
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			grpcServer.Stop()
+		}
+	}
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownContext); err != nil {

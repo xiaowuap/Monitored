@@ -18,15 +18,36 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/agent ./cmd/agent
 
+FROM golang:1.23-bookworm AS agent-build
+WORKDIR /src
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/agent ./cmd/agent
+
 FROM gcr.io/distroless/static-debian12:nonroot AS server
 COPY --from=build /out/server /server
 EXPOSE 8080
 ENTRYPOINT ["/server"]
 
-FROM gcr.io/distroless/static-debian12:nonroot AS worker
+FROM alpine:3.21 AS worker
+RUN apk add --no-cache ca-certificates ipmitool \
+ && addgroup -S monitored \
+ && adduser -S -G monitored -u 65532 monitored
 COPY --from=build /out/worker /worker
+COPY --from=build /src/profiles /profiles
+USER 65532:65532
 ENTRYPOINT ["/worker"]
 
-FROM gcr.io/distroless/static-debian12:nonroot AS agent
-COPY --from=build /out/agent /agent
+FROM debian:bookworm-slim AS agent
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates ethtool ipmitool iproute2 smartmontools \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=agent-build /out/agent /agent
+USER 65532:65532
 ENTRYPOINT ["/agent"]

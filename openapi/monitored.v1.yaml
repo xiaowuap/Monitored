@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Monitored API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     REST contract for the device-telemetry-first Monitored control plane.
     Browser endpoints use the signed `monitored_session` cookie; agents use a
@@ -15,6 +15,8 @@ tags:
   - name: Inventory
   - name: Operations
   - name: Telemetry
+  - name: Connections
+  - name: Governance
 paths:
   /healthz:
     get:
@@ -46,6 +48,10 @@ paths:
               properties:
                 email: { type: string, format: email }
                 password: { type: string, format: password }
+                totpCode:
+                  type: string
+                  pattern: '^[0-9]{6}$'
+                  description: Required after this user enables TOTP.
       responses:
         "200":
           description: Signed, HttpOnly session cookie issued.
@@ -56,6 +62,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/totp/enroll:
+    post:
+      tags: [Auth]
+      operationId: enrollTOTP
+      responses:
+        "201":
+          description: Ephemeral enrollment secret. Confirm it within ten minutes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [secret, uri, expiresInSeconds]
+                properties:
+                  secret: { type: string }
+                  uri: { type: string }
+                  expiresInSeconds: { type: integer }
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/auth/totp/confirm:
+    post:
+      tags: [Auth]
+      operationId: confirmTOTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code: { type: string, pattern: '^[0-9]{6}$' }
+      responses:
+        "200":
+          description: TOTP enabled for the current user.
         "401":
           $ref: "#/components/responses/Unauthorized"
   /api/v1/auth/logout:
@@ -249,9 +292,13 @@ paths:
             schema:
               type: object
               additionalProperties: false
+              required: [agentId]
               properties:
                 agentId: { type: string }
                 kind: { type: string, enum: [all, local, snmp, redfish, ipmi] }
+                collectors:
+                  type: array
+                  items: { type: string }
       responses:
         "202":
           description: Discovery accepted.
@@ -260,6 +307,46 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+  /api/v1/discovery/scans:
+    post:
+      tags: [Inventory]
+      operationId: createNetworkDiscoveryScan
+      description: Queues an explicit, rate-limited read-only scan on a registered Agent. No credentials are guessed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [agentId, cidr, protocols]
+              properties:
+                agentId: { type: string }
+                cidr: { type: string }
+                protocols:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum: [redfish, ipmi, snmp, nut]
+                ports:
+                  type: object
+                  additionalProperties:
+                    type: array
+                    items: { type: integer, minimum: 1, maximum: 65535 }
+                confirmLarge: { type: boolean, default: false }
+                ratePerSecond: { type: integer, minimum: 1, maximum: 256, default: 32 }
+                concurrency: { type: integer, minimum: 1, maximum: 64, default: 16 }
+      responses:
+        "202":
+          description: Agent scan queued.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          description: Scan scope or limits are invalid.
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/llm/suggestions:
     get:
       tags: [Operations]
@@ -269,6 +356,49 @@ paths:
       responses:
         "200":
           description: Reviewable semantic suggestions. Raw sensor identity remains immutable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericList"
+  /api/v1/llm/suggestions/generate:
+    post:
+      tags: [Operations]
+      operationId: createLLMSuggestionJob
+      description: Explicitly queues a read-only sensor-labeling request. Automatic labeling remains disabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sensorId, provider, model]
+              properties:
+                sensorId: { type: string, format: uuid }
+                provider:
+                  type: string
+                  enum: [openai-compatible, ollama]
+                model: { type: string, minLength: 1 }
+                context: { type: object, additionalProperties: true }
+      responses:
+        "202":
+          description: Label suggestion job queued.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/llm/suggestion-jobs:
+    get:
+      tags: [Operations]
+      operationId: listLLMSuggestionJobs
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Asynchronous label suggestion job status.
           content:
             application/json:
               schema:
@@ -308,6 +438,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/GenericList"
+    post:
+      tags: [Operations]
+      operationId: createAction
+      description: Creates an immutable approval-gated action. Shell control syntax and non-allowlisted executables are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionRequestInput"
+      responses:
+        "201":
+          description: Pending action created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "400":
+          description: Action is invalid or unsafe.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /api/v1/actions/{id}/decision:
     post:
       tags: [Operations]
@@ -330,6 +481,275 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+  /api/v1/connections:
+    get:
+      tags: [Connections]
+      operationId: listConnections
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Credential-redacted device connections.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Connections]
+      operationId: createConnection
+      description: Admin-only. Secrets are encrypted with purpose-bound AES-256-GCM.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, kind, endpoint]
+              properties:
+                name: { type: string }
+                kind: { type: string, enum: [truenas, redfish, ipmi, nut, snmp, ssh, http, tcp] }
+                endpoint: { type: string }
+                agentId: { type: [string, "null"] }
+                enabled: { type: boolean, default: true }
+                tlsMode: { type: string, enum: [verify, custom_ca, insecure], default: verify }
+                config: { type: object, additionalProperties: true }
+                secret: { type: object, additionalProperties: true, writeOnly: true }
+      responses:
+        "201":
+          description: Connection created without returning credentials.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/rules:
+    get:
+      tags: [Operations]
+      operationId: listRules
+      responses:
+        "200":
+          description: Deterministic alert rules.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Operations]
+      operationId: createRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleInput" }
+      responses:
+        "201":
+          description: Rule created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/maintenance-windows:
+    get:
+      tags: [Operations]
+      operationId: listMaintenanceWindows
+      responses:
+        "200":
+          description: Alert maintenance windows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Operations]
+      operationId: createMaintenanceWindow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, startsAt, endsAt]
+              properties:
+                name: { type: string }
+                startsAt: { type: string, format: date-time }
+                endsAt: { type: string, format: date-time }
+                assetId: { type: [string, "null"], format: uuid }
+                ruleId: { type: [string, "null"], format: uuid }
+      responses:
+        "201":
+          description: Maintenance window created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/notification-channels:
+    get:
+      tags: [Connections]
+      operationId: listNotificationChannels
+      responses:
+        "200":
+          description: Notification channels with secrets redacted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Connections]
+      operationId: createNotificationChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, kind, config]
+              properties:
+                name: { type: string }
+                kind: { type: string, enum: [telegram, feishu, webhook, smtp, bark] }
+                enabled: { type: boolean, default: true }
+                config: { type: object, additionalProperties: true }
+                secret: { type: object, additionalProperties: true, writeOnly: true }
+      responses:
+        "201":
+          description: Notification channel created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/notification-channels/{id}/test:
+    post:
+      tags: [Connections]
+      operationId: testNotificationChannel
+      parameters:
+        - $ref: "#/components/parameters/ResourceId"
+      responses:
+        "202":
+          description: A real test delivery was queued for the Worker.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: queued }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/notification-routes:
+    get:
+      tags: [Connections]
+      operationId: listNotificationRoutes
+      responses:
+        "200":
+          description: Severity, asset, grouping, locale and recovery routes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Connections]
+      operationId: createNotificationRoute
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [channelId, minSeverity]
+              properties:
+                channelId: { type: string, format: uuid }
+                minSeverity: { type: string, enum: [info, warning, critical] }
+                assetKinds:
+                  type: array
+                  items: { type: string }
+                groupWindowSeconds: { type: integer, minimum: 0, maximum: 3600, default: 120 }
+                repeatIntervalSeconds: { type: integer, minimum: 0, maximum: 604800, default: 3600 }
+                sendRecovery: { type: boolean, default: true }
+                locale: { type: string, enum: [zh-CN, en-US], default: zh-CN }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Notification route created.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/diagnoses:
+    get:
+      tags: [Operations]
+      operationId: listDiagnoses
+      responses:
+        "200":
+          description: Structured LLM-assisted diagnoses.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Operations]
+      operationId: createDiagnosis
+      description: Queues an explicitly requested, structured, read-only LLM diagnosis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider, model]
+              properties:
+                incidentId: { type: [string, "null"], format: uuid }
+                assetId: { type: [string, "null"], format: uuid }
+                provider: { type: string, enum: [openai-compatible, ollama] }
+                model: { type: string }
+                context: { type: object, additionalProperties: true }
+      responses:
+        "202":
+          description: Diagnosis queued; automatic diagnosis remains disabled.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/agents:
+    get:
+      tags: [Inventory]
+      operationId: listAgents
+      responses:
+        "200":
+          description: Registered Agents, certificate identity, capabilities, WAL and gap state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+  /api/v1/users:
+    get:
+      tags: [Governance]
+      operationId: listUsers
+      responses:
+        "200":
+          description: Admin-only user list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
+    post:
+      tags: [Governance]
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password, role]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 12, writeOnly: true }
+                role: { type: string, enum: [viewer, operator, admin] }
+      responses:
+        "201":
+          description: User created with a bcrypt password hash.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/v1/capabilities:
+    get:
+      tags: [System]
+      operationId: listCapabilities
+      responses:
+        "200":
+          description: Collector and adapter capability matrix.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GenericList" }
   /api/v1/audit:
     get:
       tags: [Operations]
@@ -414,6 +834,14 @@ components:
             required: [decision]
             properties:
               decision: { type: string, enum: [approve, reject] }
+              password:
+                type: string
+                format: password
+                description: Required when approving a root-risk action.
+              totpCode:
+                type: string
+                pattern: '^[0-9]{6}$'
+                description: Required when approving a root-risk action.
   responses:
     Unauthorized:
       description: Authentication failed.
@@ -550,6 +978,39 @@ components:
           type: array
           items: { type: object, additionalProperties: true }
         count: { type: integer }
+    RuleInput:
+      type: object
+      additionalProperties: false
+      required: [name, ruleType, severity, expression]
+      properties:
+        name: { type: string }
+        sensorId: { type: [string, "null"], format: uuid }
+        assetKind: { type: string }
+        ruleType: { type: string, enum: [threshold, rate, counter_delta, state, state_change, missing] }
+        severity: { type: string, enum: [info, warning, critical] }
+        expression: { type: object, additionalProperties: true }
+        durationSeconds: { type: integer, minimum: 0 }
+        recoveryExpression: { type: object, additionalProperties: true }
+        missingDataMode: { type: string, enum: [ignore, alert, resolve], default: ignore }
+        maintenanceWindowId: { type: [string, "null"], format: uuid }
+        enabled: { type: boolean, default: true }
+    ActionRequestInput:
+      type: object
+      additionalProperties: false
+      required: [agentId, assetId, kind, title, command, workingDirectory, identity, timeoutSeconds, risk]
+      properties:
+        agentId: { type: string }
+        assetId: { type: string, format: uuid }
+        kind: { type: string }
+        title: { type: string }
+        command: { type: string }
+        workingDirectory: { type: string }
+        identity: { type: string }
+        timeoutSeconds: { type: integer, minimum: 1, maximum: 3600 }
+        risk: { type: string, enum: [low, medium, high, root] }
+        environment:
+          type: object
+          additionalProperties: { type: string }
     IngestAsset:
       type: object
       additionalProperties: false

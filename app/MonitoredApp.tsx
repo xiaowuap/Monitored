@@ -87,13 +87,22 @@ const ReactECharts = dynamic(() => import("echarts-for-react"), {
 type Page =
   | "overview"
   | "assets"
+  | "storage"
+  | "gpu"
+  | "network"
+  | "bmc"
+  | "ups"
+  | "snmp"
   | "discovery"
+  | "connections"
+  | "rules"
   | "alerts"
   | "incidents"
   | "diagnostics"
   | "actions"
   | "notifications"
   | "audit"
+  | "users"
   | "settings";
 
 type Modal =
@@ -115,46 +124,51 @@ const queryClient = new QueryClient({
 });
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE?.replace(/\/$/, "") ?? "";
+type RuntimeMode = "demo" | "live";
+const configuredMode: RuntimeMode =
+  process.env.NEXT_PUBLIC_MONITORED_MODE === "live" ? "live" : "demo";
+const allowRuntimeSwitch =
+  process.env.NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH === "true";
 
-async function getOverview(): Promise<OverviewData> {
-  if (!apiBase) {
+async function getOverview(mode: RuntimeMode): Promise<OverviewData> {
+  if (mode === "demo") {
     await new Promise((resolve) => setTimeout(resolve, 280));
     return overviewData;
   }
-  try {
-    const response = await fetch(`${apiBase}/overview`, {
-      credentials: "include",
-    });
-    if (!response.ok) throw new Error("overview unavailable");
-    const value = (await response.json()) as {
-      healthScore: number;
-      assetCount: number;
-      onlineAssetCount: number;
-      sensorCount: number;
-      unknownCount: number;
-      firingAlertCount: number;
-      pendingActionCount: number;
-      ingestRate: number;
-      temperatureTrend?: OverviewData["trend"];
-    };
-    return {
-      healthScore: value.healthScore,
-      assetCount: value.assetCount,
-      onlineAssetCount: value.onlineAssetCount,
-      sensorCount: value.sensorCount,
-      unknownCount: value.unknownCount,
-      firingAlertCount: value.firingAlertCount,
-      pendingActionCount: value.pendingActionCount,
-      ingestRate: value.ingestRate,
-      trend: value.temperatureTrend ?? overviewData.trend,
-    };
-  } catch {
-    return overviewData;
+  if (!apiBase) {
+    throw new Error("Live Mode requires NEXT_PUBLIC_API_BASE");
   }
+  const response = await fetch(`${apiBase}/overview`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error("overview unavailable");
+  const value = (await response.json()) as {
+    healthScore: number;
+    assetCount: number;
+    onlineAssetCount: number;
+    sensorCount: number;
+    unknownCount: number;
+    firingAlertCount: number;
+    pendingActionCount: number;
+    ingestRate: number;
+    temperatureTrend?: OverviewData["trend"];
+  };
+  return {
+    healthScore: value.healthScore,
+    assetCount: value.assetCount,
+    onlineAssetCount: value.onlineAssetCount,
+    sensorCount: value.sensorCount,
+    unknownCount: value.unknownCount,
+    firingAlertCount: value.firingAlertCount,
+    pendingActionCount: value.pendingActionCount,
+    ingestRate: value.ingestRate,
+    trend: value.temperatureTrend ?? [],
+  };
 }
 
-async function postAPI(path: string, body: unknown) {
-  if (!apiBase) return;
+async function postAPI(path: string, body: unknown, mode: RuntimeMode) {
+  if (mode === "demo") return;
+  if (!apiBase) throw new Error("Live Mode requires NEXT_PUBLIC_API_BASE");
   const response = await fetch(`${apiBase}${path}`, {
     method: "POST",
     credentials: "include",
@@ -167,6 +181,13 @@ async function postAPI(path: string, body: unknown) {
 function MonitoredShell() {
   const { t } = useTranslation();
   const [page, setPage] = useState<Page>("overview");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(() => {
+    if (allowRuntimeSwitch && typeof window !== "undefined") {
+      const saved = window.localStorage.getItem("monitored-runtime-mode");
+      if (saved === "demo" || saved === "live") return saved;
+    }
+    return configuredMode;
+  });
   const [sidebarCompact, setSidebarCompact] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [modal, setModal] = useState<Modal>(null);
@@ -178,10 +199,23 @@ function MonitoredShell() {
   const [discoveryRows, setDiscoveryRows] =
     useState<DiscoveryRun[]>(initialDiscoveryRuns);
   const overviewQuery = useQuery({
-    queryKey: ["overview"],
-    queryFn: getOverview,
+    queryKey: ["overview", runtimeMode],
+    queryFn: () => getOverview(runtimeMode),
   });
-  const overview = overviewQuery.data ?? overviewData;
+  const disconnectedOverview: OverviewData = {
+    healthScore: 0,
+    assetCount: 0,
+    onlineAssetCount: 0,
+    sensorCount: 0,
+    unknownCount: 0,
+    firingAlertCount: 0,
+    pendingActionCount: 0,
+    ingestRate: 0,
+    trend: [],
+  };
+  const overview =
+    overviewQuery.data ??
+    (runtimeMode === "demo" ? overviewData : disconnectedOverview);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("monitored-language");
@@ -206,6 +240,18 @@ function MonitoredShell() {
     window.localStorage.setItem("monitored-language", next);
   };
 
+  const changeRuntimeMode = (mode: RuntimeMode) => {
+    if (!allowRuntimeSwitch) return;
+    setRuntimeMode(mode);
+    window.localStorage.setItem("monitored-runtime-mode", mode);
+    void queryClient.invalidateQueries({ queryKey: ["overview"] });
+    setToast(
+      mode === "demo"
+        ? "已进入 Demo Mode；所有数据和操作均为本地演示"
+        : "已进入 Live Mode；数据仅来自自部署 Master",
+    );
+  };
+
   const reviewSuggestion = async (
     suggestion: Suggestion,
     decision: "Accepted" | "Rejected",
@@ -222,7 +268,11 @@ function MonitoredShell() {
         : `已拒绝建议，${suggestion.rawName} 将保持原始名称`,
     );
     try {
-      await postAPI(`/llm/suggestions/${suggestion.id}/decision`, { decision });
+      await postAPI(
+        `/llm/suggestions/${suggestion.id}/decision`,
+        { decision },
+        runtimeMode,
+      );
     } catch {
       setToast("本地演示已更新；连接 Master 后会写入审计链");
     }
@@ -245,7 +295,11 @@ function MonitoredShell() {
         : "动作请求已拒绝并写入审计",
     );
     try {
-      await postAPI(`/actions/${action.id}/decision`, { decision });
+      await postAPI(
+        `/actions/${action.id}/decision`,
+        { decision },
+        runtimeMode,
+      );
     } catch {
       setToast("本地演示已更新；连接 Master 后会进入真实审批队列");
     }
@@ -284,22 +338,35 @@ function MonitoredShell() {
       );
     }, 2400);
     try {
-      await postAPI("/discovery/runs", { agentId: target, kind: "full" });
+      await postAPI(
+        "/discovery/runs",
+        { agentId: target, kind: "full" },
+        runtimeMode,
+      );
     } catch {
-      // The hosted console intentionally falls back to its deterministic demo.
+      setToast("Master 未连接；Live Mode 没有写入任何演示数据");
     }
   };
 
   const pageTitle = {
     overview: t("overview"),
     assets: t("assets"),
+    storage: "TrueNAS / 存储",
+    gpu: "GPU",
+    network: "Mellanox / RDMA",
+    bmc: "BMC",
+    ups: "UPS",
+    snmp: "SNMP",
     discovery: t("discovery"),
+    connections: "连接",
+    rules: "规则",
     alerts: t("alerts"),
     incidents: t("incidents"),
     diagnostics: t("diagnostics"),
     actions: t("actions"),
     notifications: t("notifications"),
     audit: t("audit"),
+    users: "用户与 RBAC",
     settings: t("settings"),
   }[page];
 
@@ -316,8 +383,12 @@ function MonitoredShell() {
         toggleCompact={() => setSidebarCompact((value) => !value)}
         alertCount={overview.firingAlertCount}
         actionCount={
-          actionRows.filter((action) => action.state === "pending").length
+          runtimeMode === "demo"
+            ? actionRows.filter((action) => action.state === "pending").length
+            : overview.pendingActionCount
         }
+        runtimeMode={runtimeMode}
+        connected={runtimeMode === "demo" || overviewQuery.isSuccess}
       />
 
       <main className="main-area">
@@ -328,10 +399,34 @@ function MonitoredShell() {
           onLanguage={toggleLanguage}
           onDiscover={() => setModal({ type: "discovery" })}
           languageLabel={t("language")}
+          runtimeMode={runtimeMode}
+          canSwitchRuntime={allowRuntimeSwitch}
+          onRuntimeMode={changeRuntimeMode}
         />
 
         <div className="page-canvas">
-          {page === "overview" && (
+          {runtimeMode === "demo" && (
+            <div className="demo-mode-banner" role="status">
+              <Sparkles size={16} />
+              <strong>DEMO MODE · 演示模式</strong>
+              <span>确定性样例数据；不会连接 Master，也不会执行真实操作。</span>
+            </div>
+          )}
+          {runtimeMode === "live" && overviewQuery.isError && (
+            <div className="live-mode-error" role="alert">
+              <Cable size={16} />
+              <div>
+                <strong>Master 未连接</strong>
+                <span>
+                  Live Mode 不会回退到演示数据。请检查 API 地址、认证与网络。
+                </span>
+              </div>
+              <button onClick={() => void overviewQuery.refetch()}>
+                <RefreshCw size={14} /> 重试
+              </button>
+            </div>
+          )}
+          {runtimeMode === "demo" && page === "overview" && (
             <OverviewPage
               overview={overview}
               onNavigate={navigate}
@@ -343,12 +438,30 @@ function MonitoredShell() {
               suggestions={suggestionRows}
             />
           )}
-          {page === "assets" && (
+          {runtimeMode === "demo" && page === "assets" && (
             <AssetsPage
               onAsset={(asset) => setModal({ type: "asset", asset })}
             />
           )}
-          {page === "discovery" && (
+          {runtimeMode === "demo" && page === "storage" && (
+            <DeviceWorkspacePage category="storage" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "gpu" && (
+            <DeviceWorkspacePage category="gpu" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "network" && (
+            <DeviceWorkspacePage category="network" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "bmc" && (
+            <DeviceWorkspacePage category="bmc" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "ups" && (
+            <DeviceWorkspacePage category="ups" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "snmp" && (
+            <DeviceWorkspacePage category="snmp" onAsset={(asset) => setModal({ type: "asset", asset })} />
+          )}
+          {runtimeMode === "demo" && page === "discovery" && (
             <DiscoveryPage
               runs={discoveryRows}
               suggestions={suggestionRows}
@@ -358,27 +471,42 @@ function MonitoredShell() {
               }
             />
           )}
-          {page === "alerts" && (
+          {runtimeMode === "demo" && page === "connections" && (
+            <ControlPlanePage kind="connections" onToast={setToast} />
+          )}
+          {runtimeMode === "demo" && page === "rules" && (
+            <ControlPlanePage kind="rules" onToast={setToast} />
+          )}
+          {runtimeMode === "demo" && page === "alerts" && (
             <AlertsPage
               onToast={setToast}
               onNavigate={navigate}
             />
           )}
-          {page === "incidents" && <IncidentsPage />}
-          {page === "diagnostics" && (
+          {runtimeMode === "demo" && page === "incidents" && <IncidentsPage />}
+          {runtimeMode === "demo" && page === "diagnostics" && (
             <DiagnosticsPage onToast={setToast} />
           )}
-          {page === "actions" && (
+          {runtimeMode === "demo" && page === "actions" && (
             <ActionsPage
               actions={actionRows}
               onReview={(action) => setModal({ type: "action", action })}
             />
           )}
-          {page === "notifications" && (
+          {runtimeMode === "demo" && page === "notifications" && (
             <NotificationsPage onToast={setToast} />
           )}
-          {page === "audit" && <AuditPage />}
-          {page === "settings" && <SettingsPage onToast={setToast} />}
+          {runtimeMode === "demo" && page === "audit" && <AuditPage />}
+          {runtimeMode === "demo" && page === "users" && (
+            <ControlPlanePage kind="users" onToast={setToast} />
+          )}
+          {runtimeMode === "demo" && page === "settings" && <SettingsPage onToast={setToast} />}
+          {runtimeMode === "live" && page === "overview" && (
+            <LiveOverviewPage overview={overview} loading={overviewQuery.isLoading} />
+          )}
+          {runtimeMode === "live" && page !== "overview" && (
+            <LiveResourcePage page={page} />
+          )}
         </div>
       </main>
 
@@ -412,6 +540,7 @@ function MonitoredShell() {
       )}
       {modal?.type === "command" && (
         <CommandPalette
+          runtimeMode={runtimeMode}
           onClose={() => setModal(null)}
           onNavigate={(target) => {
             navigate(target);
@@ -454,6 +583,8 @@ function Sidebar({
   toggleCompact,
   alertCount,
   actionCount,
+  runtimeMode,
+  connected,
 }: {
   page: Page;
   compact: boolean;
@@ -463,6 +594,8 @@ function Sidebar({
   toggleCompact: () => void;
   alertCount: number;
   actionCount: number;
+  runtimeMode: RuntimeMode;
+  connected: boolean;
 }) {
   const { t } = useTranslation();
   const sections: Array<{
@@ -479,6 +612,18 @@ function Sidebar({
         { id: "overview", label: t("overview"), icon: LayoutDashboard },
         { id: "assets", label: t("assets"), icon: Boxes },
         { id: "discovery", label: t("discovery"), icon: ScanSearch },
+        { id: "connections", label: "连接", icon: Cable },
+      ],
+    },
+    {
+      label: "设备遥测",
+      items: [
+        { id: "storage", label: "TrueNAS / 存储", icon: Database },
+        { id: "gpu", label: "GPU", icon: Cpu },
+        { id: "network", label: "Mellanox / RDMA", icon: Network },
+        { id: "bmc", label: "BMC", icon: Server },
+        { id: "ups", label: "UPS", icon: Power },
+        { id: "snmp", label: "SNMP", icon: Radio },
       ],
     },
     {
@@ -491,6 +636,7 @@ function Sidebar({
           count: alertCount,
         },
         { id: "incidents", label: t("incidents"), icon: Siren },
+        { id: "rules", label: "规则", icon: Gauge },
         { id: "diagnostics", label: t("diagnostics"), icon: Bot },
         {
           id: "actions",
@@ -505,6 +651,7 @@ function Sidebar({
       label: t("governance"),
       items: [
         { id: "audit", label: t("audit"), icon: ScrollText },
+        { id: "users", label: "用户与 RBAC", icon: ShieldCheck },
         { id: "settings", label: t("settings"), icon: Settings },
       ],
     },
@@ -570,11 +717,19 @@ function Sidebar({
 
         <div className="sidebar-foot">
           <div className="master-state">
-            <span className="state-beacon" />
+            <span className={`state-beacon ${connected ? "" : "offline"}`} />
             {!compact && (
               <div>
-                <strong>Master 正常</strong>
-                <span>2,184 samples/s</span>
+                <strong>
+                  {runtimeMode === "demo"
+                    ? "Demo 数据集"
+                    : connected
+                      ? "Master 正常"
+                      : "Master 断开"}
+                </strong>
+                <span>
+                  {runtimeMode === "demo" ? "不连接后端" : "自部署 Live Mode"}
+                </span>
               </div>
             )}
           </div>
@@ -605,6 +760,9 @@ function Topbar({
   onLanguage,
   onDiscover,
   languageLabel,
+  runtimeMode,
+  canSwitchRuntime,
+  onRuntimeMode,
 }: {
   title: string;
   onMenu: () => void;
@@ -612,6 +770,9 @@ function Topbar({
   onLanguage: () => void;
   onDiscover: () => void;
   languageLabel: string;
+  runtimeMode: RuntimeMode;
+  canSwitchRuntime: boolean;
+  onRuntimeMode: (mode: RuntimeMode) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -630,6 +791,24 @@ function Topbar({
         <span>{t("search")}</span>
         <kbd>⌘ K</kbd>
       </button>
+      <div className="runtime-switch" aria-label="运行模式">
+        <button
+          className={runtimeMode === "demo" ? "active" : ""}
+          disabled={!canSwitchRuntime}
+          onClick={() => onRuntimeMode("demo")}
+          title={canSwitchRuntime ? "使用内置确定性样例数据" : "运行模式由构建配置固定"}
+        >
+          Demo
+        </button>
+        <button
+          className={runtimeMode === "live" ? "active" : ""}
+          disabled={!canSwitchRuntime}
+          onClick={() => onRuntimeMode("live")}
+          title={canSwitchRuntime ? "连接自部署 Master" : "运行模式由构建配置固定"}
+        >
+          Live
+        </button>
+      </div>
       <div className="topbar-actions">
         <button className="icon-button language-button" onClick={onLanguage}>
           <Languages size={17} />
@@ -1633,6 +1812,323 @@ function SettingsPage({ onToast }: { onToast: (message: string) => void }) {
   );
 }
 
+function DeviceWorkspacePage({
+  category,
+  onAsset,
+}: {
+  category: "storage" | "gpu" | "network" | "bmc" | "ups" | "snmp";
+  onAsset: (asset: Asset) => void;
+}) {
+  const config = {
+    storage: {
+      eyebrow: "TRUENAS · SMART · OPENZFS",
+      title: "TrueNAS / 存储",
+      description: "池、磁盘、容量、健康、温度与 standby-safe SMART 遥测",
+      kinds: ["pool", "disk"],
+      icon: HardDrive,
+    },
+    gpu: {
+      eyebrow: "NVML · DCGM CAPABILITY",
+      title: "GPU",
+      description: "温度、功耗、利用率、显存、ECC、PCIe 与能力可用性",
+      kinds: ["gpu"],
+      icon: Cpu,
+    },
+    network: {
+      eyebrow: "MELLANOX · RDMA · ROCE",
+      title: "Mellanox / RDMA",
+      description: "链路、FEC、物理错误、拥塞、光模块和 InfiniBand 计数",
+      kinds: ["nic"],
+      icon: Network,
+    },
+    bmc: {
+      eyebrow: "REDFISH · IPMI 2.0",
+      title: "BMC",
+      description: "机箱、Thermal、Power、风扇、PSU 与 HealthRollup",
+      kinds: ["bmc"],
+      icon: Server,
+    },
+    ups: {
+      eyebrow: "NETWORK UPS TOOLS",
+      title: "UPS",
+      description: "电量、负载、剩余时间、电压、频率、温度和状态",
+      kinds: ["ups"],
+      icon: Power,
+    },
+    snmp: {
+      eyebrow: "SNMP V3 AUTHPRIV · PROFILE",
+      title: "SNMP",
+      description: "标准 MIB 与受约束 YAML profile 的实体和传感器映射",
+      kinds: ["snmp"],
+      icon: Radio,
+    },
+  }[category];
+  const rows = assets.filter((asset) => config.kinds.includes(asset.kind));
+  const Icon = config.icon;
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow={config.eyebrow}
+        title={config.title}
+        description={config.description}
+        actions={
+          <button className="button primary">
+            <Plus size={16} /> 添加连接
+          </button>
+        }
+      />
+      <section className="device-summary-grid">
+        <article className="panel device-summary-primary">
+          <Icon size={24} />
+          <div>
+            <span>已发现设备</span>
+            <strong>{rows.length}</strong>
+          </div>
+        </article>
+        <article className="panel">
+          <span>传感器</span>
+          <strong>{formatNumber(rows.reduce((sum, row) => sum + row.sensors, 0))}</strong>
+        </article>
+        <article className="panel">
+          <span>未知通道</span>
+          <strong>{rows.reduce((sum, row) => sum + row.unknown, 0)}</strong>
+        </article>
+        <article className="panel">
+          <span>只读边界</span>
+          <strong>ENFORCED</strong>
+        </article>
+      </section>
+      <section className="panel dedicated-device-list">
+        <PanelHeader
+          title={`${config.title} 资产`}
+          subtitle="Demo fixture · 能力按设备探测"
+          icon={Icon}
+        />
+        {rows.length > 0 ? (
+          rows.map((asset) => (
+            <button key={asset.id} onClick={() => onAsset(asset)}>
+              <AssetIcon asset={asset} />
+              <div>
+                <strong>{asset.name}</strong>
+                <span>{asset.host} · {asset.source}</span>
+              </div>
+              <div className="device-primary-metric">
+                <strong>{asset.primaryMetric}</strong>
+                <span>{asset.secondaryMetric}</span>
+              </div>
+              <HealthPill health={asset.health} />
+              <ChevronRight size={16} />
+            </button>
+          ))
+        ) : (
+          <div className="empty-device-state">
+            <Radio size={22} />
+            <strong>暂无演示资产</strong>
+            <span>添加连接后，发现结果会保留原始 OID、索引与稳定身份。</span>
+          </div>
+        )}
+      </section>
+      <section className="panel capability-workspace">
+        <PanelHeader title="Capability matrix" subtitle="连接成功不等于具备全部采集权限" icon={ShieldCheck} />
+        {collectorMatrix.slice(0, 6).map((collector) => (
+          <div key={collector.label}>
+            <span className={`state-dot ${collector.state.includes("采集") || collector.state.includes("增强") ? "healthy" : "warning"}`} />
+            <strong>{collector.label}</strong>
+            <span>{collector.detail}</span>
+          </div>
+        ))}
+      </section>
+    </div>
+  );
+}
+
+function ControlPlanePage({
+  kind,
+  onToast,
+}: {
+  kind: "connections" | "rules" | "users";
+  onToast: (message: string) => void;
+}) {
+  const content = {
+    connections: {
+      eyebrow: "ENCRYPTED CONNECTION INVENTORY",
+      title: "连接",
+      description: "只读凭据、执行凭据、TLS 验证和 Agent 路由彼此分离",
+      rows: [
+        ["TrueNAS SCALE · edge-01", "JSON-RPC WebSocket", "TLS verified", "healthy"],
+        ["edge-01 BMC", "Redfish HTTPS", "read-only account", "healthy"],
+        ["Rack A UPS", "NUT upsd", "remote read-only", "warning"],
+        ["Core switch", "SNMPv3 authPriv", "AES privacy", "healthy"],
+      ],
+    },
+    rules: {
+      eyebrow: "DETERMINISTIC RULE ENGINE",
+      title: "规则",
+      description: "阈值、变化率、计数器增量、持续时间、恢复和维护窗口",
+      rows: [
+        ["磁盘温度过高", "threshold · 5m", "critical", "healthy"],
+        ["UPS 电量偏低", "threshold · 2m", "warning", "warning"],
+        ["RDMA 丢弃增长", "counter delta · 5m", "warning", "healthy"],
+        ["Agent 遥测缺失", "missing data · 2m", "critical", "healthy"],
+      ],
+    },
+    users: {
+      eyebrow: "AUTHENTICATION · RBAC",
+      title: "用户与 RBAC",
+      description: "Viewer 只读、Operator 运行发现与规则、Admin 管理凭据与审批",
+      rows: [
+        ["admin@example.com", "Admin", "TOTP recommended", "healthy"],
+        ["noc@example.com", "Operator", "Last login 12m", "healthy"],
+        ["auditor@example.com", "Viewer", "Read-only", "healthy"],
+      ],
+    },
+  }[kind];
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow={content.eyebrow}
+        title={content.title}
+        description={content.description}
+        actions={
+          <button className="button primary" onClick={() => onToast("Demo Mode：表单不会写入真实 Master")}>
+            <Plus size={16} /> 新建
+          </button>
+        }
+      />
+      <section className="panel control-plane-list">
+        {content.rows.map(([name, detail, policy, state]) => (
+          <article key={name}>
+            <span className={`state-dot ${state}`} />
+            <div>
+              <strong>{name}</strong>
+              <span>{detail}</span>
+            </div>
+            <code>{policy}</code>
+            <button className="button secondary" onClick={() => onToast(`已打开 ${name} 的演示详情`)}>
+              查看
+            </button>
+          </article>
+        ))}
+      </section>
+      <div className="safety-note">
+        <LockKeyhole size={17} />
+        <span>
+          Demo Mode 不保存凭据、不发送通知、不创建用户；切换到 Live Mode 后由自部署 Master 执行 RBAC 与审计。
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LiveOverviewPage({
+  overview,
+  loading,
+}: {
+  overview: OverviewData;
+  loading: boolean;
+}) {
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="SELF-HOSTED MASTER · LIVE"
+        title="设备总览"
+        description="以下数据仅来自当前配置的自部署 Master。"
+      />
+      <section className="notification-health">
+        <div><strong>{loading ? "…" : overview.assetCount}</strong><span>资产</span></div>
+        <div><strong>{loading ? "…" : overview.sensorCount}</strong><span>传感器</span></div>
+        <div><strong>{loading ? "…" : overview.firingAlertCount}</strong><span>活动告警</span></div>
+        <div><strong>{loading ? "…" : `${overview.ingestRate}/s`}</strong><span>摄取速率</span></div>
+      </section>
+      <section className="panel live-overview-panel">
+        <PanelHeader title="实时温度与功耗" subtitle="Master 聚合序列" icon={Activity} />
+        {overview.trend.length > 0 ? (
+          <TelemetryChart data={overview.trend} range="24h" />
+        ) : (
+          <div className="empty-device-state">
+            <Activity size={22} />
+            <strong>尚无趋势样本</strong>
+            <span>注册 Agent 或设备连接后，数据会在这里出现。</span>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function LiveResourcePage({ page }: { page: Exclude<Page, "overview"> }) {
+  const specification: Record<Exclude<Page, "overview">, { path: string; title: string; kinds?: string[] }> = {
+    assets: { path: "/assets", title: "资产" },
+    storage: { path: "/assets", title: "TrueNAS / 存储", kinds: ["pool", "disk"] },
+    gpu: { path: "/assets", title: "GPU", kinds: ["gpu"] },
+    network: { path: "/assets", title: "Mellanox / RDMA", kinds: ["nic"] },
+    bmc: { path: "/assets", title: "BMC", kinds: ["bmc", "chassis"] },
+    ups: { path: "/assets", title: "UPS", kinds: ["ups"] },
+    snmp: { path: "/assets", title: "SNMP", kinds: ["snmp"] },
+    discovery: { path: "/discovery/runs", title: "自动发现中心" },
+    connections: { path: "/connections", title: "连接" },
+    rules: { path: "/rules", title: "规则" },
+    alerts: { path: "/alerts", title: "告警" },
+    incidents: { path: "/incidents", title: "Incident" },
+    diagnostics: { path: "/diagnoses", title: "诊断" },
+    actions: { path: "/actions", title: "动作审批" },
+    notifications: { path: "/notification-channels", title: "通知" },
+    audit: { path: "/audit", title: "审计" },
+    users: { path: "/users", title: "用户与 RBAC" },
+    settings: { path: "/capabilities", title: "能力与设置" },
+  };
+  const selected = specification[page];
+  const query = useQuery({
+    queryKey: ["live-resource", page],
+    queryFn: async () => {
+      if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
+      const response = await fetch(`${apiBase}${selected.path}`, { credentials: "include" });
+      if (!response.ok) throw new Error(`Master returned ${response.status}`);
+      const payload = (await response.json()) as { items?: Array<Record<string, unknown>> };
+      const rows = payload.items ?? [];
+      return selected.kinds
+        ? rows.filter((row) => selected.kinds?.includes(String(row.kind)))
+        : rows;
+    },
+  });
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="SELF-HOSTED MASTER · LIVE DATA"
+        title={selected.title}
+        description={`GET /api/v1${selected.path} · 不使用演示回退`}
+      />
+      <section className="panel live-resource-panel">
+        {query.isLoading && <div className="empty-device-state"><RefreshCw className="spin" size={22} /><strong>正在读取 Master</strong></div>}
+        {query.isError && (
+          <div className="empty-device-state">
+            <AlertTriangle size={22} />
+            <strong>无法读取资源</strong>
+            <span>{query.error instanceof Error ? query.error.message : "Unknown error"}</span>
+            <button className="button secondary" onClick={() => void query.refetch()}>重试</button>
+          </div>
+        )}
+        {query.isSuccess && query.data.length === 0 && (
+          <div className="empty-device-state">
+            <Radio size={22} />
+            <strong>暂无数据</strong>
+            <span>这是 Live Mode 的真实空状态，不是演示数据。</span>
+          </div>
+        )}
+        {query.data?.map((row, index) => (
+          <article className="live-resource-row" key={String(row.id ?? index)}>
+            <div>
+              <strong>{String(row.name ?? row.title ?? row.ruleName ?? row.email ?? row.id ?? "Resource")}</strong>
+              <span>{String(row.kind ?? row.state ?? row.role ?? row.status ?? "")}</span>
+            </div>
+            <code>{JSON.stringify(row)}</code>
+          </article>
+        ))}
+      </section>
+    </div>
+  );
+}
+
 function MetricCard({
   icon: Icon,
   iconTone,
@@ -2117,10 +2613,12 @@ function ActionModal({
 }
 
 function CommandPalette({
+  runtimeMode,
   onClose,
   onNavigate,
   onAsset,
 }: {
+  runtimeMode: RuntimeMode;
   onClose: () => void;
   onNavigate: (page: Page) => void;
   onAsset: (asset: Asset) => void;
@@ -2134,9 +2632,16 @@ function CommandPalette({
     ["diagnostics", "智能诊断", Bot],
     ["actions", "动作审批", ClipboardCheck],
   ];
-  const filteredAssets = assets.filter((asset) =>
-    `${asset.name} ${asset.model}`.toLowerCase().includes(query.toLowerCase()),
-  ).slice(0, 4);
+  const filteredAssets =
+    runtimeMode === "demo"
+      ? assets
+          .filter((asset) =>
+            `${asset.name} ${asset.model}`
+              .toLowerCase()
+              .includes(query.toLowerCase()),
+          )
+          .slice(0, 4)
+      : [];
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="command-palette" onMouseDown={(event) => event.stopPropagation()}>
@@ -2150,12 +2655,14 @@ function CommandPalette({
               ))}
             </div>
           )}
-          <div className="command-group">
-            <span>{query ? "匹配资产" : "最近资产"}</span>
-            {filteredAssets.map((asset) => (
-              <button key={asset.id} onClick={() => onAsset(asset)}><AssetIcon asset={asset} /><span><strong>{asset.name}</strong><small>{asset.model}</small></span><HealthPill health={asset.health} /></button>
-            ))}
-          </div>
+          {runtimeMode === "demo" && (
+            <div className="command-group">
+              <span>{query ? "匹配资产" : "最近资产"}</span>
+              {filteredAssets.map((asset) => (
+                <button key={asset.id} onClick={() => onAsset(asset)}><AssetIcon asset={asset} /><span><strong>{asset.name}</strong><small>{asset.model}</small></span><HealthPill health={asset.health} /></button>
+              ))}
+            </div>
+          )}
         </div>
         <div className="command-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span>原始名称与稳定 ID 均可搜索</span></div>
       </div>

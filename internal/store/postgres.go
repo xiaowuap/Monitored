@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	actioncore "github.com/monitored-io/monitored/internal/action"
 	"github.com/monitored-io/monitored/internal/domain"
 )
 
@@ -61,6 +61,22 @@ func (r *Repository) Ping(ctx context.Context) error {
 }
 
 func (r *Repository) Migrate(ctx context.Context) error {
+	connection, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('monitored-schema-migrations'))`); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	defer connection.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('monitored-schema-migrations'))`)
+	if _, err := connection.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			name text PRIMARY KEY,
+			applied_at timestamptz NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create migration ledger: %w", err)
+	}
 	entries, err := fs.ReadDir(migrations, "migrations")
 	if err != nil {
 		return fmt.Errorf("read embedded migrations: %w", err)
@@ -72,12 +88,31 @@ func (r *Repository) Migrate(ctx context.Context) error {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
+		var applied bool
+		if err := connection.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, entry.Name()).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", entry.Name(), err)
+		}
+		if applied {
+			continue
+		}
 		body, readErr := migrations.ReadFile("migrations/" + entry.Name())
 		if readErr != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), readErr)
 		}
-		if _, execErr := r.pool.Exec(ctx, string(body)); execErr != nil {
+		tx, beginErr := connection.Begin(ctx)
+		if beginErr != nil {
+			return fmt.Errorf("begin migration %s: %w", entry.Name(), beginErr)
+		}
+		if _, execErr := tx.Exec(ctx, string(body)); execErr != nil {
+			_ = tx.Rollback(ctx)
 			return fmt.Errorf("execute migration %s: %w", entry.Name(), execErr)
+		}
+		if _, insertErr := tx.Exec(ctx, `INSERT INTO schema_migrations (name) VALUES ($1)`, entry.Name()); insertErr != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("record migration %s: %w", entry.Name(), insertErr)
+		}
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), commitErr)
 		}
 	}
 	return nil
@@ -335,15 +370,34 @@ func (r *Repository) ListDiscoveryRuns(ctx context.Context, limit int) ([]domain
 	return runs, rows.Err()
 }
 
-func (r *Repository) CreateDiscoveryRun(ctx context.Context, actor, agentID, kind string) (domain.DiscoveryRun, error) {
+func (r *Repository) CreateDiscoveryRun(
+	ctx context.Context,
+	actor, agentID, kind string,
+	collectors []string,
+) (domain.DiscoveryRun, error) {
 	if kind == "" {
 		kind = "full"
 	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.DiscoveryRun{}, fmt.Errorf("begin discovery run: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var agentExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM agents WHERE id = $1 AND state <> 'revoked'
+		)`, agentID).Scan(&agentExists); err != nil {
+		return domain.DiscoveryRun{}, err
+	}
+	if !agentExists {
+		return domain.DiscoveryRun{}, ErrNotFound
+	}
 	var run domain.DiscoveryRun
 	var details []byte
-	err := r.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO discovery_runs (agent_id, kind, state, requested_by, progress, details)
-		VALUES (NULLIF($1, ''), $2, 'running', $3, 8, '{"phase":"capability-check"}')
+		VALUES ($1, $2, 'queued', $3, 0, '{"phase":"queued"}')
 		RETURNING id::text, agent_id, kind, state, requested_by, started_at, finished_at,
 			assets_found, sensors_found, unknown_found, progress, details`,
 		agentID, kind, actor,
@@ -356,10 +410,23 @@ func (r *Repository) CreateDiscoveryRun(ctx context.Context, actor, agentID, kin
 		return domain.DiscoveryRun{}, fmt.Errorf("create discovery run: %w", err)
 	}
 	run.Details = domain.JSONMap(details)
-	if err := r.AppendAudit(ctx, actor, "discovery.started", "discovery_run", run.ID, "", map[string]any{
+	payload, _ := json.Marshal(map[string]any{
+		"runId": run.ID, "collectors": collectors, "kind": kind,
+	})
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO agent_tasks (agent_id, kind, payload, expires_at)
+		VALUES ($1, 'discovery', $2::jsonb, now() + interval '15 minutes')`,
+		agentID, payload,
+	); err != nil {
+		return domain.DiscoveryRun{}, fmt.Errorf("queue discovery task: %w", err)
+	}
+	if err := appendAuditTx(ctx, tx, actor, "discovery.queued", "discovery_run", run.ID, "", map[string]any{
 		"agentId": agentID,
 		"kind":    kind,
 	}); err != nil {
+		return domain.DiscoveryRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return domain.DiscoveryRun{}, err
 	}
 	return run, nil
@@ -381,6 +448,77 @@ func (r *Repository) CompleteDiscoveryRun(ctx context.Context, id string) error 
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (r *Repository) CreateDiscoveryScan(
+	ctx context.Context,
+	actor, agentID, cidr string,
+	protocols []string,
+	ports map[string][]uint16,
+	confirmLarge bool,
+	ratePerSecond, concurrency int,
+) (domain.DiscoveryRun, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.DiscoveryRun{}, fmt.Errorf("begin discovery scan: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var agentExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM agents WHERE id = $1 AND state <> 'revoked'
+		)`, agentID).Scan(&agentExists); err != nil {
+		return domain.DiscoveryRun{}, err
+	}
+	if !agentExists {
+		return domain.DiscoveryRun{}, ErrNotFound
+	}
+
+	var run domain.DiscoveryRun
+	var details []byte
+	err = tx.QueryRow(ctx, `
+		INSERT INTO discovery_runs (agent_id, kind, state, requested_by, progress, details)
+		VALUES ($1, 'network-scan', 'queued', $2, 0,
+			jsonb_build_object('phase', 'queued', 'cidr', $3::text, 'protocols', $4::jsonb))
+		RETURNING id::text, agent_id, kind, state, requested_by, started_at, finished_at,
+			assets_found, sensors_found, unknown_found, progress, details`,
+		agentID, actor, cidr, mustJSON(protocols),
+	).Scan(
+		&run.ID, &run.AgentID, &run.Kind, &run.State, &run.RequestedBy,
+		&run.StartedAt, &run.FinishedAt, &run.AssetsFound, &run.SensorsFound,
+		&run.UnknownFound, &run.Progress, &details,
+	)
+	if err != nil {
+		return domain.DiscoveryRun{}, fmt.Errorf("create discovery scan: %w", err)
+	}
+	run.Details = domain.JSONMap(details)
+	payload, _ := json.Marshal(map[string]any{
+		"runId": run.ID, "cidr": cidr, "protocols": protocols, "ports": ports,
+		"confirmLarge": confirmLarge, "ratePerSecond": ratePerSecond,
+		"concurrency": concurrency,
+	})
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO agent_tasks (agent_id, kind, payload, expires_at)
+		VALUES ($1, 'discovery', $2::jsonb, now() + interval '30 minutes')`,
+		agentID, payload,
+	); err != nil {
+		return domain.DiscoveryRun{}, fmt.Errorf("queue network discovery task: %w", err)
+	}
+	if err := appendAuditTx(ctx, tx, actor, "discovery.scan_queued", "discovery_run", run.ID, "", map[string]any{
+		"agentId": agentID, "cidr": cidr, "protocols": protocols,
+		"confirmLarge": confirmLarge, "ratePerSecond": ratePerSecond,
+	}); err != nil {
+		return domain.DiscoveryRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DiscoveryRun{}, err
+	}
+	return run, nil
+}
+
+func mustJSON(value any) []byte {
+	result, _ := json.Marshal(value)
+	return result
 }
 
 func (r *Repository) ListSuggestions(ctx context.Context, status string, limit int) ([]domain.LLMSuggestion, error) {
@@ -478,10 +616,10 @@ func (r *Repository) ListActions(ctx context.Context, state string, limit int) (
 		limit = 100
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT ar.id::text, ar.asset_id::text, a.name, ar.kind, ar.title, ar.command,
+		SELECT ar.id::text, COALESCE(ar.agent_id, ''), ar.asset_id::text, a.name, ar.kind, ar.title, ar.command,
 			ar.working_directory, ar.run_identity, ar.timeout_seconds, ar.risk, ar.state,
 			ar.immutable_hash, ar.requested_by, ar.requested_at, ar.approved_by,
-			ar.approved_at, ar.result
+			ar.approved_at, ar.result, ar.environment
 		FROM action_requests ar
 		JOIN assets a ON a.id = ar.asset_id
 		WHERE ($1 = '' OR ar.state = $1)
@@ -494,17 +632,18 @@ func (r *Repository) ListActions(ctx context.Context, state string, limit int) (
 	actions := make([]domain.ActionRequest, 0)
 	for rows.Next() {
 		var action domain.ActionRequest
-		var resultJSON []byte
+		var resultJSON, environmentJSON []byte
 		if err := rows.Scan(
-			&action.ID, &action.AssetID, &action.AssetName, &action.Kind, &action.Title,
+			&action.ID, &action.AgentID, &action.AssetID, &action.AssetName, &action.Kind, &action.Title,
 			&action.Command, &action.WorkingDirectory, &action.Identity,
 			&action.TimeoutSeconds, &action.Risk, &action.State, &action.ImmutableHash,
 			&action.RequestedBy, &action.RequestedAt, &action.ApprovedBy,
-			&action.ApprovedAt, &resultJSON,
+			&action.ApprovedAt, &resultJSON, &environmentJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan action: %w", err)
 		}
 		action.Result = domain.JSONMap(resultJSON)
+		_ = json.Unmarshal(environmentJSON, &action.Environment)
 		actions = append(actions, action)
 	}
 	return actions, rows.Err()
@@ -520,12 +659,19 @@ func (r *Repository) ReviewAction(ctx context.Context, id, decision, actor, remo
 	}
 	defer tx.Rollback(ctx)
 
-	var currentState, immutableHash string
+	var currentState, immutableHash, command, workingDirectory, identity, risk, assetID string
+	var agentID *string
+	var timeoutSeconds int
+	var environmentJSON []byte
 	err = tx.QueryRow(ctx, `
-		SELECT state, immutable_hash
+		SELECT state, immutable_hash, agent_id, command, working_directory,
+			run_identity, timeout_seconds, risk, asset_id::text, environment
 		FROM action_requests
 		WHERE id = $1::uuid
-		FOR UPDATE`, id).Scan(&currentState, &immutableHash)
+		FOR UPDATE`, id).Scan(
+		&currentState, &immutableHash, &agentID, &command, &workingDirectory,
+		&identity, &timeoutSeconds, &risk, &assetID, &environmentJSON,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -538,19 +684,19 @@ func (r *Repository) ReviewAction(ctx context.Context, id, decision, actor, remo
 
 	nextState := "rejected"
 	var tokenHash *string
+	var plainToken string
 	if decision == "approve" {
 		nextState = "approved"
-		token := make([]byte, 32)
-		if _, err := rand.Read(token); err != nil {
-			return fmt.Errorf("create one-time action token: %w", err)
+		token, hash, tokenErr := actioncore.NewOneTimeToken()
+		if tokenErr != nil {
+			return fmt.Errorf("create one-time action token: %w", tokenErr)
 		}
-		hash := sha256.Sum256(token)
-		value := hex.EncodeToString(hash[:])
-		tokenHash = &value
+		plainToken, tokenHash = token, &hash
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE action_requests
-		SET state = $2, approved_by = $3, approved_at = now(), one_time_token_hash = $4
+		SET state = $2, approved_by = $3, approved_at = now(), one_time_token_hash = $4,
+			execution_token_expires_at = CASE WHEN $2 = 'approved' THEN now() + interval '15 minutes' ELSE NULL END
 		WHERE id = $1::uuid`, id, nextState, actor, tokenHash)
 	if err != nil {
 		return fmt.Errorf("review action: %w", err)
@@ -560,6 +706,23 @@ func (r *Repository) ReviewAction(ctx context.Context, id, decision, actor, remo
 		"nextState":     nextState,
 	}); err != nil {
 		return err
+	}
+	if decision == "approve" && agentID != nil && *agentID != "" {
+		var environment map[string]string
+		_ = json.Unmarshal(environmentJSON, &environment)
+		payload, _ := json.Marshal(map[string]any{
+			"oneTimeToken": plainToken, "command": command,
+			"workingDirectory": workingDirectory, "identity": identity,
+			"timeoutSeconds": timeoutSeconds, "risk": risk, "assetId": assetID,
+			"environment": environment, "actionRequestId": id,
+		})
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO agent_tasks (agent_id, kind, payload, immutable_hash, expires_at)
+			VALUES ($1, 'action', $2::jsonb, $3, now() + interval '15 minutes')`,
+			*agentID, payload, immutableHash,
+		); err != nil {
+			return fmt.Errorf("queue approved action: %w", err)
+		}
 	}
 	return tx.Commit(ctx)
 }

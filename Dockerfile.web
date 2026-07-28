@@ -1,16 +1,26 @@
 # syntax=docker/dockerfile:1.7
 FROM node:24-alpine AS build
 WORKDIR /app
+ENV NEXT_TELEMETRY_DISABLED=1
 ARG NEXT_PUBLIC_API_BASE=http://localhost:8080/api/v1
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
+ARG NEXT_PUBLIC_MONITORED_MODE=live
+ENV NEXT_PUBLIC_MONITORED_MODE=${NEXT_PUBLIC_MONITORED_MODE}
+ARG NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH=false
+ENV NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH=${NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH}
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts --no-audit
 COPY . .
 RUN npm run build
 
 FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=build /app ./
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV HOSTNAME=0.0.0.0
+COPY --from=build /app/public ./public
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+USER node
 EXPOSE 3000
-CMD ["npm", "run", "start", "--", "--host", "0.0.0.0"]
+CMD ["node", "server.js"]

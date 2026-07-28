@@ -5,8 +5,6 @@ dist/
 coverage/
 node_modules/
 web/dist/
-.vinext/
-.wrangler/
 .next/
 tsconfig.tsbuildinfo
 *.log
@@ -14,3 +12,4 @@ tsconfig.tsbuildinfo
 *.db-shm
 *.db-wal
 .DS_Store
+secrets/

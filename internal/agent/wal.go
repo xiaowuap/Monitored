@@ -27,6 +27,12 @@ type WAL struct {
 	path string
 }
 
+type Gap struct {
+	From   time.Time `json:"from"`
+	To     time.Time `json:"to"`
+	Reason string    `json:"reason"`
+}
+
 func NewWAL(path string) *WAL {
 	return &WAL{path: path}
 }
@@ -125,6 +131,28 @@ func (w *WAL) Stats() (bytes int64, oldest time.Time, err error) {
 	return info.Size(), oldest, nil
 }
 
+func (w *WAL) Gap() (Gap, error) {
+	body, err := os.ReadFile(w.path + ".gap.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return Gap{}, nil
+	}
+	if err != nil {
+		return Gap{}, err
+	}
+	var gap Gap
+	if err := json.Unmarshal(body, &gap); err != nil {
+		return Gap{}, err
+	}
+	return gap, nil
+}
+
+func (w *WAL) ClearGap() error {
+	if err := os.Remove(w.path + ".gap.json"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 func (w *WAL) prune() error {
 	info, err := os.Stat(w.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -143,6 +171,7 @@ func (w *WAL) prune() error {
 	rewrite := enforceSize
 	now := time.Now()
 	entries := make([]queuedBatch, 0)
+	var dropped []queuedBatch
 	var retainedBytes int64
 	reader := bufio.NewReader(file)
 	for {
@@ -157,6 +186,7 @@ func (w *WAL) prune() error {
 		if json.Unmarshal(line, &entry) == nil {
 			if now.Sub(entry.QueuedAt) > maxWALAge {
 				rewrite = true
+				dropped = append(dropped, entry)
 				if errors.Is(readErr, io.EOF) {
 					break
 				}
@@ -167,6 +197,7 @@ func (w *WAL) prune() error {
 			for enforceSize && retainedBytes > targetBytes && len(entries) > 1 {
 				encoded, _ := json.Marshal(entries[0])
 				retainedBytes -= int64(len(encoded) + 1)
+				dropped = append(dropped, entries[0])
 				entries = entries[1:]
 				rewrite = true
 			}
@@ -180,7 +211,33 @@ func (w *WAL) prune() error {
 	if !rewrite {
 		return nil
 	}
+	if len(dropped) > 0 {
+		reason := "WAL retention exceeded"
+		if enforceSize {
+			reason = "WAL size limit exceeded"
+		}
+		if err := w.recordGap(Gap{From: dropped[0].QueuedAt, To: dropped[len(dropped)-1].QueuedAt, Reason: reason}); err != nil {
+			return err
+		}
+	}
 	return w.replace(entries)
+}
+
+func (w *WAL) recordGap(gap Gap) error {
+	if existing, err := w.Gap(); err == nil && !existing.From.IsZero() {
+		if existing.From.Before(gap.From) {
+			gap.From = existing.From
+		}
+		if existing.To.After(gap.To) {
+			gap.To = existing.To
+		}
+		gap.Reason = existing.Reason + "; " + gap.Reason
+	}
+	body, err := json.Marshal(gap)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(w.path+".gap.json", body, 0o600)
 }
 
 func (w *WAL) replace(entries []queuedBatch) error {
