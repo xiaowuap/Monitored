@@ -23,20 +23,23 @@ import (
 )
 
 type GRPCConfig struct {
-	Target       string
-	AgentID      string
-	StableHostID string
-	Hostname     string
-	Version      string
-	CertFile     string
-	KeyFile      string
-	CAFile       string
-	ServerName   string
-	Insecure     bool
-	Collectors   []string
-	Tools        []string
-	Metadata     map[string]string
-	TaskHandler  func(context.Context, *monitoredv1.MasterEnvelope) *monitoredv1.TaskResult
+	Target                string
+	AgentID               string
+	StableHostID          string
+	Hostname              string
+	Version               string
+	CertFile              string
+	KeyFile               string
+	CAFile                string
+	ServerName            string
+	Insecure              bool
+	Credentials           *CredentialStore
+	RenewBefore           time.Duration
+	RotationCheckInterval time.Duration
+	Collectors            []string
+	Tools                 []string
+	Metadata              map[string]string
+	TaskHandler           func(context.Context, *monitoredv1.MasterEnvelope) *monitoredv1.TaskResult
 }
 
 type GRPCClient struct {
@@ -58,6 +61,11 @@ func (c *GRPCClient) Connect(ctx context.Context) error {
 	defer c.stateMu.Unlock()
 	if c.stream != nil {
 		return nil
+	}
+	if c.config.Credentials != nil {
+		if err := c.config.Credentials.Ensure(ctx); err != nil {
+			return err
+		}
 	}
 	transport, err := c.transportCredentials()
 	if err != nil {
@@ -89,6 +97,9 @@ func (c *GRPCClient) Connect(ctx context.Context) error {
 		return err
 	}
 	go c.receive(streamContext, stream)
+	if c.config.Credentials != nil {
+		go c.rotationLoop(streamContext, stream)
+	}
 	return nil
 }
 
@@ -189,6 +200,22 @@ func (c *GRPCClient) receive(ctx context.Context, stream grpc.BidiStreamingClien
 			c.stateMu.Unlock()
 			return
 		}
+		if bundle := envelope.GetCertificateBundle(); bundle != nil && c.config.Credentials != nil {
+			if err := c.config.Credentials.InstallRotation(
+				bundle.RequestId,
+				bundle.CertificatePem,
+				bundle.CaPem,
+				time.Now(),
+			); err == nil {
+				c.stateMu.Lock()
+				if c.stream == stream {
+					c.resetLocked()
+				}
+				c.stateMu.Unlock()
+				return
+			}
+			continue
+		}
 		if envelope.GetAcknowledgement() != nil || c.config.TaskHandler == nil {
 			continue
 		}
@@ -200,6 +227,62 @@ func (c *GRPCClient) receive(ctx context.Context, stream grpc.BidiStreamingClien
 			AgentId: c.config.AgentID, MessageId: c.messageID(), SentAtUnixMs: time.Now().UnixMilli(),
 			Payload: &monitoredv1.AgentEnvelope_TaskResult{TaskResult: result},
 		})
+	}
+}
+
+func (c *GRPCClient) rotationLoop(
+	ctx context.Context,
+	stream grpc.BidiStreamingClient[monitoredv1.AgentEnvelope, monitoredv1.MasterEnvelope],
+) {
+	interval := c.config.RotationCheckInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	renewBefore := c.config.RenewBefore
+	if renewBefore <= 0 {
+		renewBefore = 7 * 24 * time.Hour
+	}
+	check := func() {
+		requestID, csrPEM, needed, err := c.config.Credentials.RotationRequest(
+			c.config.AgentID,
+			renewBefore,
+			time.Now(),
+		)
+		if err != nil || !needed {
+			return
+		}
+		err = c.send(&monitoredv1.AgentEnvelope{
+			AgentId:      c.config.AgentID,
+			MessageId:    c.messageID(),
+			SentAtUnixMs: time.Now().UnixMilli(),
+			Payload: &monitoredv1.AgentEnvelope_CertificateSigningRequest{
+				CertificateSigningRequest: &monitoredv1.CertificateSigningRequest{
+					RequestId: requestID,
+					CsrPem:    csrPEM,
+				},
+			},
+		})
+		if err != nil {
+			c.config.Credentials.CancelRotation(requestID)
+		}
+	}
+	check()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer c.config.Credentials.CancelRotation("")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.stateMu.Lock()
+			current := c.stream == stream
+			c.stateMu.Unlock()
+			if !current {
+				return
+			}
+			check()
+		}
 	}
 }
 
@@ -216,6 +299,13 @@ func (c *GRPCClient) resetLocked() {
 func (c *GRPCClient) transportCredentials() (credentials.TransportCredentials, error) {
 	if c.config.Insecure {
 		return insecure.NewCredentials(), nil
+	}
+	if c.config.Credentials != nil {
+		tlsConfig, err := c.config.Credentials.TLSConfig(c.config.ServerName)
+		if err != nil {
+			return nil, err
+		}
+		return credentials.NewTLS(tlsConfig), nil
 	}
 	if c.config.CertFile == "" || c.config.KeyFile == "" || c.config.CAFile == "" {
 		return nil, errors.New("Agent gRPC mTLS requires certificate, key, and CA files")

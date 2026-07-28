@@ -42,3 +42,20 @@ func TestOriginAllowedLimitsLocalhostExceptionToLocalDevelopment(t *testing.T) {
 		t.Fatal("configured production origin should be allowed")
 	}
 }
+
+func TestAgentEnrollmentRequiresHTTPSOutsideLoopback(t *testing.T) {
+	for _, test := range []struct {
+		publicURL string
+		allowed   bool
+	}{
+		{publicURL: "https://monitored.example", allowed: true},
+		{publicURL: "http://localhost:3000", allowed: true},
+		{publicURL: "http://127.0.0.1:3000", allowed: true},
+		{publicURL: "http://monitored.example", allowed: false},
+	} {
+		api := &API{config: config.Server{PublicURL: test.publicURL}}
+		if got := api.secureEnrollmentEndpoint(); got != test.allowed {
+			t.Fatalf("secureEnrollmentEndpoint(%q) = %v", test.publicURL, got)
+		}
+	}
+}

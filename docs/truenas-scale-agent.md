@@ -49,15 +49,14 @@ services:
       - /sys:/host/sys:ro
       - /etc/machine-id:/host/etc/machine-id:ro
       - /mnt/tank/monitored-agent:/var/lib/monitored-agent
-      - /mnt/tank/monitored-pki:/run/monitored-pki:ro
     environment:
       MONITORED_AGENT_PROTOCOL: grpc
+      MONITORED_SERVER_URL: https://master.example
       MONITORED_GRPC_TARGET: master.example:9443
       MONITORED_AGENT_NAME: truenas-scale-01
-      MONITORED_AGENT_TLS_CERT_FILE: /run/monitored-pki/agent.crt
-      MONITORED_AGENT_TLS_KEY_FILE: /run/monitored-pki/agent.key
-      MONITORED_AGENT_TLS_CA_FILE: /run/monitored-pki/ca.crt
-      MONITORED_AGENT_TLS_SERVER_NAME: master.example
+      # 只在首次启动前设置；配对成功后删除。
+      MONITORED_AGENT_ENROLLMENT_TOKEN: menr_one_time_value
+      MONITORED_AGENT_CREDENTIAL_FILE: /var/lib/monitored-agent/credentials.json
       MONITORED_SYS_ROOT: /host
       MONITORED_DEVICE_ROOT: /dev
       MONITORED_SMART_INTERVAL: 5m

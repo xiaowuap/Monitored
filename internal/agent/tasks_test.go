@@ -7,6 +7,7 @@ import (
 	"time"
 
 	monitoredv1 "github.com/monitored-io/monitored/gen/monitored/v1"
+	"github.com/monitored-io/monitored/internal/agentupdate"
 	"github.com/monitored-io/monitored/internal/collector"
 	"github.com/monitored-io/monitored/internal/domain"
 )
@@ -17,6 +18,31 @@ func (taskFixtureCollector) Name() string            { return "fixture" }
 func (taskFixtureCollector) Interval() time.Duration { return time.Minute }
 func (taskFixtureCollector) Capability(context.Context) collector.Capability {
 	return collector.Capability{Name: "fixture", State: "available"}
+}
+
+type updateFixture struct {
+	value agentupdate.Update
+}
+
+func (f *updateFixture) Apply(_ context.Context, value agentupdate.Update) (agentupdate.Result, error) {
+	f.value = value
+	return agentupdate.Result{Version: value.Version, Strategy: value.Strategy, RestartScheduled: true}, nil
+}
+
+func TestAgentUpdateTaskUsesDedicatedUpdater(t *testing.T) {
+	fixture := &updateFixture{}
+	handler := TaskHandler{Updates: fixture}
+	result := handler.Handle(context.Background(), &monitoredv1.MasterEnvelope{
+		Payload: &monitoredv1.MasterEnvelope_Update{Update: &monitoredv1.AgentUpdateTask{
+			TaskId: "task-update", PackageId: "package-1", Version: "1.2.3",
+			Strategy: "binary", TargetOs: "linux", Architecture: "amd64",
+			DownloadUrl: "https://master.example/package", Sha256: "abc", SizeBytes: 42,
+		}},
+	})
+	if result == nil || result.Status != "succeeded" || fixture.value.PackageID != "package-1" ||
+		fixture.value.DownloadURL != "https://master.example/package" {
+		t.Fatalf("unexpected update result=%#v request=%#v", result, fixture.value)
+	}
 }
 func (taskFixtureCollector) Collect(context.Context) (domain.IngestBatch, error) {
 	value := 42.0

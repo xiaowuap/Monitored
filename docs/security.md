@@ -16,7 +16,12 @@
 
 ## Agent
 
-正式边界是 TLS 1.3 双向认证。客户端证书身份必须匹配 Agent ID。开发 Compose 的 insecure gRPC 有明显配置项，不能用于跨主机网络。REST bearer ingest 只作为兼容通道。
+正式边界是 TLS 1.3 双向认证。客户端证书身份必须匹配 Agent ID。添加设备使用绑定 Agent ID 的短期一次性令牌；Agent 本地生成 Ed25519 私钥，Master 只签 CSR。短期证书会在已认证的 gRPC 流上自动换钥续签，凭据以单个 `0600` 文件原子替换。Agent CA 私钥只允许 Master 的受限 signer 读取。开发 Compose 的 insecure gRPC 有明显配置项，不能用于跨主机网络，而且不能签发轮换证书。REST bearer ingest 只作为兼容通道。
+
+自主更新默认由 Agent 本地策略禁用。二进制包经过 Admin 上传、目标 OS/架构匹配、短期
+HMAC 下载授权、长度/SHA-256 校验和 `--version` 试运行后才原子替换，并保留 `.previous`。
+Docker 只接受不可变 digest；容器重建命令必须在 Agent 本机配置，Master 不能注入。挂载
+Docker socket 等同授予宿主机 root，属于显式高权限部署选择。详见 [Agent 自主更新](agent-updates.md)。
 
 ## 动作
 

@@ -42,7 +42,7 @@ Worker 的 TrueNAS/Redfish/IPMI/NUT/SNMP/SSH/HTTP/TCP 连接无需额外容器�
 ## Release 安装
 
 `v*` tag 会触发 GitHub Release 工作流。工作流先执行 Go/Web 全量检查，再生成
-amd64/arm64 Linux 二进制包、Web standalone 包、SHA256 校验和，并向 GHCR 发布
+amd64/arm64 Linux 与 amd64 FreeBSD Agent 二进制包、Web standalone 包、SHA256 校验和，并向 GHCR 发布
 server、worker、web 和 agent 多架构镜像。
 
 下载 Release 中的 `compose.release.yaml` 与 `release.env.example`：
@@ -62,11 +62,20 @@ curl http://localhost:8080/healthz
 ./scripts/update-release.sh .env compose.release.yaml
 ```
 
-生产数据目录与 PKI 目录必须位于持久化存储，并保持私钥仅对 root 可读。
+生产数据目录与 PKI 目录必须位于持久化存储。Agent CA 私钥由 Master signer
+只读挂载，不得进入其他容器；Agent 的托管凭据文件保持 `0600`。
+Agent 更新包缓存在 `${MONITORED_DATA_DIR}/update-cache`，升级或重建 Master 时必须保留。
+Release Compose 使用 bind mount；首次启动前创建目录并允许 Server 的 UID 65532 写入：
+
+```bash
+install -d -o 65532 -g 0 -m 0770 "${MONITORED_DATA_DIR}/update-cache"
+```
 
 远程 Linux Agent 使用 Release 中对应架构的 `monitored-agent_*` 包、
-`deploy/systemd/monitored-agent.service` 和独立的 mTLS 身份。每台主机的
+`deploy/systemd/monitored-agent.service` 和一次性配对令牌。每台主机的
 `MONITORED_AGENT_NAME` 必须唯一，并保持 `MONITORED_ALLOW_ROOT_ACTIONS=false`。
+systemd Agent 可通过本机策略启用原子二进制更新；Docker digest pull 的权限边界与配置见
+[Agent 自主更新](agent-updates.md)。
 
 ## 生产 mTLS
 
@@ -77,7 +86,9 @@ curl http://localhost:8080/healthz
 docker compose -f compose.yaml -f compose.mtls.yaml --profile agent up -d --build
 ```
 
-脚本证书适合小型自管安装。大型环境应使用内部 CA、短期证书和自动轮换。
+脚本证书适合小型自管安装。Master 挂载 Agent CA key 后，Admin 可在
+“设置 → Agent 与证书”中生成一次性配对命令；Agent 会在本地生成私钥并自动换钥续签。
+大型环境可把相同 signer 边界接到受控内部 CA/HSM。
 
 Compose Agent 固定以非 root UID 65532 运行。它内置 smartctl、ipmitool、ethtool 和 devlink，但读取宿主设备仍需逐个映射并授予最小权限。只有确有需要的现场 Agent 才应以 root-capable service 运行，并同时设置 `MONITORED_ALLOW_ROOT_ACTIONS=true`；Master 端仍会要求 Admin 密码与 TOTP 二次认证。
 

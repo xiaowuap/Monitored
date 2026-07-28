@@ -39,10 +39,15 @@ services:
       <<: *common-env
       MONITORED_HTTP_ADDR: :8080
       MONITORED_GRPC_ADDR: :9443
+      MONITORED_GRPC_PUBLIC_TARGET: ${MONITORED_GRPC_PUBLIC_TARGET}
       MONITORED_GRPC_INSECURE: "false"
       MONITORED_GRPC_CERT_FILE: /run/monitored-pki/server.crt
       MONITORED_GRPC_KEY_FILE: /run/monitored-pki/server.key
       MONITORED_GRPC_CLIENT_CA_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_CA_CERT_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_CA_KEY_FILE: /run/monitored-pki/ca.key
+      MONITORED_AGENT_UPDATE_CACHE_DIR: /var/lib/monitored/update-cache
+      MONITORED_AGENT_UPDATE_MAX_BYTES: ${MONITORED_AGENT_UPDATE_MAX_BYTES:-268435456}
       MONITORED_PUBLIC_URL: ${MONITORED_PUBLIC_URL}
       MONITORED_AGENT_TOKEN: ${MONITORED_AGENT_TOKEN}
       MONITORED_MASTER_KEY: ${MONITORED_MASTER_KEY}
@@ -52,8 +57,10 @@ services:
       MONITORED_AUTO_MIGRATE: "true"
     volumes:
       - ${MONITORED_CONFIG_DIR}/pki/ca.crt:/run/monitored-pki/ca.crt:ro
+      - ${MONITORED_CONFIG_DIR}/pki/ca.key:/run/monitored-pki/ca.key:ro
       - ${MONITORED_CONFIG_DIR}/pki/server.crt:/run/monitored-pki/server.crt:ro
       - ${MONITORED_CONFIG_DIR}/pki/server.key:/run/monitored-pki/server.key:ro
+      - ${MONITORED_DATA_DIR}/update-cache:/var/lib/monitored/update-cache
     depends_on:
       postgres:
         condition: service_healthy

@@ -24,7 +24,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/monitored-agent
+ReadWritePaths=/var/lib/monitored-agent /usr/local/bin
 
 [Install]
 WantedBy=multi-user.target

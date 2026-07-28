@@ -26,3 +26,22 @@ test("login route posts credentials and supports optional TOTP", async () => {
   assert.match(source, /code === "totp_required"/);
   assert.match(source, /safeReturnPath/);
 });
+
+test("topbar notification bell opens a navigable notification center", async () => {
+  const source = await readFile("app/MonitoredApp.tsx", "utf8");
+
+  assert.match(source, /onClick=\{onNotifications\}/);
+  assert.match(source, /type: "notifications"/);
+  assert.match(source, /function NotificationCenter/);
+  assert.match(source, /apiRequest\("\/alerts\?active=true"\)/);
+  assert.match(source, /onNavigate\("actions"\)/);
+});
+
+test("live Agent settings expose cached binary and Docker update rollout", async () => {
+  const source = await readFile("app/MonitoredApp.tsx", "utf8");
+
+  assert.match(source, /apiRequest\("\/agent-update-packages"/);
+  assert.match(source, /\/agents\/\$\{encodeURIComponent\(target\)\}\/updates/);
+  assert.match(source, /Server 二进制包/);
+  assert.match(source, /Docker Pull/);
+});

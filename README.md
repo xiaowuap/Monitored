@@ -45,9 +45,10 @@ docker compose -f compose.yaml -f compose.mtls.yaml --profile agent up --build
 ## 已实现的主链路
 
 - Go Master/Worker/Linux-FreeBSD Agent；REST/OpenAPI、SSE、Protobuf 双向 gRPC。
-- gRPC mTLS 客户端证书身份绑定、Agent 注册/能力/发现快照/样本/心跳/WAL 缺口/任务 ACK。
+- gRPC TLS 1.3 mTLS 身份绑定；一次性令牌配对、本地生成私钥、短期客户端证书和到期前自动换钥续签。
 - 24 小时或 1 GiB 有界 Agent WAL；恢复后顺序补传，因保留上限丢弃时上报时间缺口。
-- PostgreSQL 资产拓扑、传感器身份、分区样本、1 分钟/1 小时聚合、规则、告警、Incident、诊断、动作、通知、用户和哈希链审计。
+- Master 持久化 Agent 更新包、短期签名下载、目标匹配与审计；Agent 按本机策略执行原子二进制更新或 Docker digest pull。
+- PostgreSQL 资产拓扑、传感器身份、分区父表/default 样本、1 分钟/1 小时聚合、规则、告警、Incident、诊断、动作、通知、用户和哈希链审计。
 - Linux hwmon、PCI、USB、block、NIC、thermal、power_supply、EDAC、DRM、devlink、InfiniBand/RDMA；FreeBSD sysctl 基线。
 - standby-safe ATA/NVMe/SCSI SMART、多温度、ZFS pool/vdev/scrub/dataset/snapshot/ARC、动态加载 NVML 与 `nvidia-smi` fallback、MFT/IPMI 本机只读采集。
 - Worker 直接轮询 TrueNAS JSON-RPC、Redfish、IPMI、NUT、SNMP v2c/v3、严格 host-key SSH、HTTP/TCP；Agent 也可补充 TrueNAS SCALE 本机视角。
@@ -56,9 +57,9 @@ docker compose -f compose.yaml -f compose.mtls.yaml --profile agent up --build
 - Telegram、飞书、Webhook(HMAC)、SMTP、Bark 通知及持久化指数退避重试。
 - OpenAI-compatible 与 Ollama 的待审核传感器标注和结构化诊断；自动诊断默认关闭，证据按不可信输入处理，模型不拥有告警或执行权。
 - 无 Shell 受限动作执行器：允许列表、真实 OS 身份边界、不可变哈希、一次性短期令牌、低权限默认、超时、进程组终止和输出上限；root 需 Admin 密码 + TOTP 再认证和 Agent 显式启用。
-- Viewer/Operator/Admin RBAC、多用户 bcrypt 密码、自包含 Live/Demo WebUI 和设备专页。
+- Viewer/Operator/Admin RBAC、多用户 bcrypt 密码、Live 总览/Agent 管理与明确标识的 Demo 设备专页。
 
-硬件功能具有运行时 capability 状态；缺少工具、权限或字段时返回 unavailable/degraded，不把不支持值写成零。详细矩阵见 [Collectors](docs/collectors.md)，实际交付深度见 [Roadmap 状态](docs/roadmap-status.md)。
+硬件功能具有运行时 capability 状态；缺少工具、权限或字段时返回 unavailable/degraded，不把不支持值写成零。详细矩阵见 [Collectors](docs/collectors.md)。Live 专用页面、统一事件面、日分区生命周期和实机/容量验收的剩余缺口已在 [Roadmap 状态](docs/roadmap-status.md) 明确列出。
 
 ## 仓库结构
 
@@ -113,7 +114,7 @@ go run ./cmd/loadgen \
 ## 文档
 
 - [架构](docs/architecture.md)
-- [部署](docs/deployment.md) · [Demo Mode](docs/demo-mode.md) · [Agent mTLS](docs/agent-mtls.md)
+- [部署](docs/deployment.md) · [Demo Mode](docs/demo-mode.md) · [Agent mTLS](docs/agent-mtls.md) · [Agent 自主更新](docs/agent-updates.md)
 - [TrueNAS SCALE Agent](docs/truenas-scale-agent.md)
 - [Collectors](docs/collectors.md) · [连接配置](docs/connections.md) · [LLM](docs/llm.md) · [API](docs/api.md)
 - [安全](docs/security.md) · [运维](docs/operations.md) · [备份与升级](docs/backup-upgrade.md)

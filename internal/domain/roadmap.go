@@ -122,24 +122,28 @@ type LLMSuggestionJob struct {
 }
 
 type Agent struct {
-	ID            string         `json:"id"`
-	StableHostID  string         `json:"stableHostId"`
-	Hostname      string         `json:"hostname"`
-	OS            string         `json:"os"`
-	Architecture  string         `json:"architecture"`
-	Version       string         `json:"version"`
-	State         string         `json:"state"`
-	CertificateID string         `json:"certificateId,omitempty"`
-	Capabilities  []string       `json:"capabilities"`
-	Tools         []string       `json:"tools"`
-	Metadata      map[string]any `json:"metadata"`
-	LastSeenAt    time.Time      `json:"lastSeenAt"`
-	WALBytes      int64          `json:"walBytes"`
-	OldestWALAt   *time.Time     `json:"oldestWalAt,omitempty"`
-	LastGapFrom   *time.Time     `json:"lastGapFrom,omitempty"`
-	LastGapTo     *time.Time     `json:"lastGapTo,omitempty"`
-	LastGapReason string         `json:"lastGapReason,omitempty"`
-	RegisteredAt  time.Time      `json:"registeredAt"`
+	ID               string         `json:"id"`
+	StableHostID     string         `json:"stableHostId"`
+	Hostname         string         `json:"hostname"`
+	OS               string         `json:"os"`
+	Architecture     string         `json:"architecture"`
+	Version          string         `json:"version"`
+	State            string         `json:"state"`
+	CertificateID    string         `json:"certificateId,omitempty"`
+	Capabilities     []string       `json:"capabilities"`
+	Tools            []string       `json:"tools"`
+	Metadata         map[string]any `json:"metadata"`
+	LastSeenAt       time.Time      `json:"lastSeenAt"`
+	WALBytes         int64          `json:"walBytes"`
+	OldestWALAt      *time.Time     `json:"oldestWalAt,omitempty"`
+	LastGapFrom      *time.Time     `json:"lastGapFrom,omitempty"`
+	LastGapTo        *time.Time     `json:"lastGapTo,omitempty"`
+	LastGapReason    string         `json:"lastGapReason,omitempty"`
+	RegisteredAt     time.Time      `json:"registeredAt"`
+	DesiredVersion   string         `json:"desiredVersion,omitempty"`
+	LastUpdateStatus string         `json:"lastUpdateStatus,omitempty"`
+	LastUpdateAt     *time.Time     `json:"lastUpdateAt,omitempty"`
+	LastUpdateError  string         `json:"lastUpdateError,omitempty"`
 }
 
 type AgentTask struct {

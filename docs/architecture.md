@@ -33,7 +33,7 @@ flowchart LR
 
 ## Agent 流
 
-第一个 gRPC envelope 必须是 Registration，`agent_id` 必须与客户端证书 CN、DNS SAN 或 URI SAN 末段一致。随后传输能力清单、资产快照、样本、心跳、WAL 缺口和任务结果。Master 反向下发 discovery、只读 diagnostic 和已审批 action；每个消息有 message ID 与 ACK。
+第一个 gRPC envelope 必须是 Registration，`agent_id` 必须与客户端证书 CN、DNS SAN 或 URI SAN 末段一致。随后传输能力清单、资产快照、样本、心跳、WAL 缺口和任务结果。Master 反向下发 discovery、只读 diagnostic、已审批 action 和受本地策略约束的 Agent update；每个消息有 message ID 与 ACK。
 
 正式契约位于 `proto/monitored/v1/agent.proto`，生成代码提交在 `gen/`，便于离线构建。
 

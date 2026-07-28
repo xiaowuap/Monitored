@@ -54,7 +54,6 @@ openssl x509 -req -sha256 -days 90 \
   -out "${output_dir}/${agent_id}.crt"
 
 rm "${output_dir}/server.csr" "${output_dir}/${agent_id}.csr"
-chmod 600 "${output_dir}/ca.key"
-chmod 640 "${output_dir}/server.key" "${output_dir}/${agent_id}.key"
+chmod 640 "${output_dir}/ca.key" "${output_dir}/server.key" "${output_dir}/${agent_id}.key"
 chmod 644 "${output_dir}"/*.crt
 echo "generated CA, server certificate, and 90-day agent certificate in ${output_dir}"

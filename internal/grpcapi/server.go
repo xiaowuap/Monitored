@@ -16,6 +16,8 @@ import (
 
 	monitoredv1 "github.com/monitored-io/monitored/gen/monitored/v1"
 	"github.com/monitored-io/monitored/internal/domain"
+	"github.com/monitored-io/monitored/internal/security"
+	"github.com/monitored-io/monitored/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -33,16 +35,26 @@ type Repository interface {
 	ApplyDiscoverySnapshot(context.Context, string, string, domain.IngestBatch) error
 	NextAgentTasks(context.Context, string, int) ([]domain.AgentTask, error)
 	CompleteAgentTask(context.Context, string, string, string, map[string]any) error
+	AuthorizeAgentCertificateRenewal(context.Context, string) error
 }
 
 type AgentControl struct {
 	monitoredv1.UnimplementedAgentControlServer
 	repository    Repository
 	allowInsecure bool
+	agentIssuer   security.AgentCertificateIssuer
 }
 
-func New(repository Repository, allowInsecure bool) *AgentControl {
-	return &AgentControl{repository: repository, allowInsecure: allowInsecure}
+func New(
+	repository Repository,
+	allowInsecure bool,
+	agentIssuer security.AgentCertificateIssuer,
+) *AgentControl {
+	return &AgentControl{
+		repository:    repository,
+		allowInsecure: allowInsecure,
+		agentIssuer:   agentIssuer,
+	}
 }
 
 func NewServer(service *AgentControl, certFile, keyFile, clientCAFile string, insecureMode bool) (*grpc.Server, error) {
@@ -104,6 +116,9 @@ func (s *AgentControl) Connect(stream grpc.BidiStreamingServer[monitoredv1.Agent
 		CertificateID: certificateID, Metadata: map[string]any{"transport": "grpc"},
 	}
 	if err := s.repository.RegisterAgent(stream.Context(), agent); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return status.Error(codes.PermissionDenied, "Agent identity has been revoked")
+		}
 		return status.Error(codes.Internal, "agent registration failed")
 	}
 	var sendMu sync.Mutex
@@ -130,7 +145,7 @@ func (s *AgentControl) Connect(stream grpc.BidiStreamingServer[monitoredv1.Agent
 		if envelope.AgentId != first.AgentId {
 			return status.Error(codes.PermissionDenied, "agent_id changed within a stream")
 		}
-		if err := s.handle(stream.Context(), first.AgentId, envelope); err != nil {
+		if err := s.handle(stream.Context(), first.AgentId, envelope, send); err != nil {
 			return err
 		}
 		if err := acknowledge(send, envelope.MessageId); err != nil {
@@ -139,7 +154,12 @@ func (s *AgentControl) Connect(stream grpc.BidiStreamingServer[monitoredv1.Agent
 	}
 }
 
-func (s *AgentControl) handle(ctx context.Context, agentID string, envelope *monitoredv1.AgentEnvelope) error {
+func (s *AgentControl) handle(
+	ctx context.Context,
+	agentID string,
+	envelope *monitoredv1.AgentEnvelope,
+	send func(*monitoredv1.MasterEnvelope) error,
+) error {
 	switch payload := envelope.Payload.(type) {
 	case *monitoredv1.AgentEnvelope_Capabilities:
 		metadata := make(map[string]any, len(payload.Capabilities.Metadata))
@@ -176,6 +196,40 @@ func (s *AgentControl) handle(ctx context.Context, agentID string, envelope *mon
 			taskStatus = "failed"
 		}
 		return repositoryError(s.repository.CompleteAgentTask(ctx, agentID, payload.TaskResult.TaskId, taskStatus, result))
+	case *monitoredv1.AgentEnvelope_CertificateSigningRequest:
+		if s.allowInsecure {
+			return status.Error(codes.FailedPrecondition, "certificate rotation requires authenticated mTLS")
+		}
+		if s.agentIssuer == nil {
+			return status.Error(codes.FailedPrecondition, "automatic Agent certificate issuance is not configured")
+		}
+		if err := s.repository.AuthorizeAgentCertificateRenewal(ctx, agentID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return status.Error(codes.PermissionDenied, "Agent identity is not allowed to renew certificates")
+			}
+			return status.Error(codes.Internal, "Agent certificate renewal authorization failed")
+		}
+		request := payload.CertificateSigningRequest
+		if request == nil || strings.TrimSpace(request.RequestId) == "" ||
+			len(request.RequestId) > 128 || len(request.CsrPem) == 0 || len(request.CsrPem) > 64<<10 {
+			return status.Error(codes.InvalidArgument, "invalid Agent certificate signing request")
+		}
+		certificate, err := s.agentIssuer.IssueAgentCertificate(agentID, request.CsrPem, time.Now())
+		if err != nil {
+			return status.Error(codes.InvalidArgument, "invalid Agent certificate signing request")
+		}
+		return send(&monitoredv1.MasterEnvelope{
+			MessageId:    "certificate-" + request.RequestId,
+			SentAtUnixMs: time.Now().UnixMilli(),
+			Payload: &monitoredv1.MasterEnvelope_CertificateBundle{
+				CertificateBundle: &monitoredv1.CertificateBundle{
+					RequestId:      request.RequestId,
+					CertificatePem: certificate.CertificatePEM,
+					CaPem:          certificate.CAPEM,
+					NotAfterUnixMs: certificate.NotAfter.UnixMilli(),
+				},
+			},
+		})
 	case *monitoredv1.AgentEnvelope_Registration:
 		return status.Error(codes.InvalidArgument, "registration may only be sent once")
 	default:
@@ -255,6 +309,20 @@ func taskEnvelope(task domain.AgentTask) *monitoredv1.MasterEnvelope {
 			TimeoutSeconds:   int32(numberValue(task.Payload["timeoutSeconds"], 60)),
 			Identity:         stringValue(task.Payload["identity"]), Risk: stringValue(task.Payload["risk"]),
 			AssetId: stringValue(task.Payload["assetId"]),
+		}}
+	case "update":
+		envelope.Payload = &monitoredv1.MasterEnvelope_Update{Update: &monitoredv1.AgentUpdateTask{
+			TaskId:       task.ID,
+			PackageId:    stringValue(task.Payload["packageId"]),
+			Version:      stringValue(task.Payload["version"]),
+			Strategy:     stringValue(task.Payload["strategy"]),
+			TargetOs:     stringValue(task.Payload["targetOs"]),
+			Architecture: stringValue(task.Payload["architecture"]),
+			DownloadUrl:  stringValue(task.Payload["downloadUrl"]),
+			Sha256:       stringValue(task.Payload["sha256"]),
+			SizeBytes:    int64(numberValue(task.Payload["sizeBytes"], 0)),
+			Image:        stringValue(task.Payload["image"]),
+			ImageDigest:  stringValue(task.Payload["imageDigest"]),
 		}}
 	default:
 		return nil

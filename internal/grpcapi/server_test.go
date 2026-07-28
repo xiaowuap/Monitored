@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -10,16 +11,37 @@ import (
 
 	monitoredv1 "github.com/monitored-io/monitored/gen/monitored/v1"
 	"github.com/monitored-io/monitored/internal/domain"
+	"github.com/monitored-io/monitored/internal/security"
+	"github.com/monitored-io/monitored/internal/store"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 )
+
+type fakeCertificateIssuer struct {
+	issuedAgentID string
+	issuedCSR     []byte
+}
+
+func (f *fakeCertificateIssuer) IssueAgentCertificate(agentID string, csr []byte, _ time.Time) (security.AgentCertificate, error) {
+	if len(csr) == 0 {
+		return security.AgentCertificate{}, errors.New("empty CSR")
+	}
+	f.issuedAgentID = agentID
+	f.issuedCSR = append([]byte(nil), csr...)
+	return security.AgentCertificate{
+		CertificatePEM: []byte("certificate"),
+		CAPEM:          []byte("ca"),
+		NotAfter:       time.Unix(2_000_000_000, 0),
+	}, nil
+}
 
 type fakeRepository struct {
 	mu         sync.Mutex
 	registered domain.Agent
 	batches    []domain.IngestBatch
 	heartbeat  int64
+	renewalErr error
 }
 
 func (f *fakeRepository) RegisterAgent(_ context.Context, value domain.Agent) error {
@@ -55,10 +77,13 @@ func (f *fakeRepository) NextAgentTasks(context.Context, string, int) ([]domain.
 func (f *fakeRepository) CompleteAgentTask(context.Context, string, string, string, map[string]any) error {
 	return nil
 }
+func (f *fakeRepository) AuthorizeAgentCertificateRenewal(context.Context, string) error {
+	return f.renewalErr
+}
 
 func TestInsecureDevelopmentStreamRegistrationSnapshotAndHeartbeat(t *testing.T) {
 	repository := &fakeRepository{}
-	server, err := NewServer(New(repository, true), "", "", "", true)
+	server, err := NewServer(New(repository, true, nil), "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +156,64 @@ func TestCertificateIdentityMatching(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedStreamCanRotateCertificate(t *testing.T) {
+	issuer := &fakeCertificateIssuer{}
+	service := New(&fakeRepository{}, false, issuer)
+	var sent *monitoredv1.MasterEnvelope
+	err := service.handle(context.Background(), "edge-01", &monitoredv1.AgentEnvelope{
+		Payload: &monitoredv1.AgentEnvelope_CertificateSigningRequest{
+			CertificateSigningRequest: &monitoredv1.CertificateSigningRequest{
+				RequestId: "rotation-1",
+				CsrPem:    []byte("csr"),
+			},
+		},
+	}, func(value *monitoredv1.MasterEnvelope) error {
+		sent = value
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("handle certificate rotation: %v", err)
+	}
+	if issuer.issuedAgentID != "edge-01" || string(issuer.issuedCSR) != "csr" {
+		t.Fatalf("issuer received Agent %q CSR %q", issuer.issuedAgentID, issuer.issuedCSR)
+	}
+	bundle := sent.GetCertificateBundle()
+	if bundle == nil || bundle.RequestId != "rotation-1" || string(bundle.CertificatePem) != "certificate" {
+		t.Fatalf("certificate bundle = %#v", bundle)
+	}
+}
+
+func TestInsecureStreamCannotRotateCertificate(t *testing.T) {
+	service := New(&fakeRepository{}, true, &fakeCertificateIssuer{})
+	err := service.handle(context.Background(), "edge-01", &monitoredv1.AgentEnvelope{
+		Payload: &monitoredv1.AgentEnvelope_CertificateSigningRequest{
+			CertificateSigningRequest: &monitoredv1.CertificateSigningRequest{
+				RequestId: "rotation-1",
+				CsrPem:    []byte("csr"),
+			},
+		},
+	}, func(*monitoredv1.MasterEnvelope) error { return nil })
+	if err == nil {
+		t.Fatal("insecure stream was allowed to rotate a certificate")
+	}
+}
+
+func TestRevokedAgentCannotRotateCertificate(t *testing.T) {
+	issuer := &fakeCertificateIssuer{}
+	service := New(&fakeRepository{renewalErr: store.ErrNotFound}, false, issuer)
+	err := service.handle(context.Background(), "edge-01", &monitoredv1.AgentEnvelope{
+		Payload: &monitoredv1.AgentEnvelope_CertificateSigningRequest{
+			CertificateSigningRequest: &monitoredv1.CertificateSigningRequest{
+				RequestId: "rotation-1",
+				CsrPem:    []byte("csr"),
+			},
+		},
+	}, func(*monitoredv1.MasterEnvelope) error { return nil })
+	if err == nil || issuer.issuedAgentID != "" {
+		t.Fatal("revoked Agent was allowed to reach the certificate issuer")
+	}
+}
+
 func TestDiscoveryTaskEnvelopeCarriesBoundedScanConfiguration(t *testing.T) {
 	envelope := taskEnvelope(domain.AgentTask{
 		ID: "task-1", Kind: "discovery",
@@ -150,5 +233,23 @@ func TestDiscoveryTaskEnvelopeCarriesBoundedScanConfiguration(t *testing.T) {
 		task.ScanPorts[0].Ports[0] != 8443 ||
 		task.RatePerSecond != 20 || task.Concurrency != 8 {
 		t.Fatalf("scan task configuration was not preserved: %#v", task)
+	}
+}
+
+func TestAgentUpdateTaskEnvelopePreservesVerifiedPackageMetadata(t *testing.T) {
+	envelope := taskEnvelope(domain.AgentTask{
+		ID: "task-update", Kind: "update",
+		Payload: map[string]any{
+			"packageId": "package-1", "version": "1.2.3", "strategy": "binary",
+			"targetOs": "linux", "architecture": "amd64",
+			"downloadUrl": "https://master.example/package", "sha256": "abc",
+			"sizeBytes": float64(42),
+		},
+	})
+	task := envelope.GetUpdate()
+	if task == nil || task.TaskId != "task-update" || task.PackageId != "package-1" ||
+		task.Version != "1.2.3" || task.DownloadUrl != "https://master.example/package" ||
+		task.SizeBytes != 42 {
+		t.Fatalf("Agent update task metadata was not preserved: %#v", task)
 	}
 }

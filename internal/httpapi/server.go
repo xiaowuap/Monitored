@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	actioncore "github.com/monitored-io/monitored/internal/action"
+	"github.com/monitored-io/monitored/internal/agentupdate"
 	"github.com/monitored-io/monitored/internal/config"
 	"github.com/monitored-io/monitored/internal/domain"
 	"github.com/monitored-io/monitored/internal/security"
@@ -22,23 +24,37 @@ import (
 )
 
 type API struct {
-	repository *store.Repository
-	config     config.Server
-	auth       *authenticator
-	events     *Broker
-	logger     *slog.Logger
-	sealer     *security.Sealer
+	repository  *store.Repository
+	config      config.Server
+	auth        *authenticator
+	events      *Broker
+	logger      *slog.Logger
+	sealer      *security.Sealer
+	agentIssuer security.AgentCertificateIssuer
+	updateCache *agentupdate.Cache
 }
 
-func New(repository *store.Repository, cfg config.Server, logger *slog.Logger) http.Handler {
+func New(
+	repository *store.Repository,
+	cfg config.Server,
+	logger *slog.Logger,
+	agentIssuer security.AgentCertificateIssuer,
+) http.Handler {
 	sealer, _ := security.NewSealer(cfg.MasterKey)
+	updateSigningKey := sha256.Sum256([]byte(cfg.MasterKey + "|agent-update-downloads"))
+	updateCache, cacheErr := agentupdate.NewCache(cfg.AgentUpdateCacheDir, updateSigningKey[:], cfg.AgentUpdateMaxBytes)
+	if cacheErr != nil {
+		logger.Error("initialize Agent update cache", "error", cacheErr)
+	}
 	api := &API{
-		repository: repository,
-		config:     cfg,
-		auth:       newAuthenticator(cfg, repository),
-		events:     NewBroker(),
-		logger:     logger,
-		sealer:     sealer,
+		repository:  repository,
+		config:      cfg,
+		auth:        newAuthenticator(cfg, repository),
+		events:      NewBroker(),
+		logger:      logger,
+		sealer:      sealer,
+		agentIssuer: agentIssuer,
+		updateCache: updateCache,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", api.health)
@@ -79,6 +95,12 @@ func New(repository *store.Repository, cfg config.Server, logger *slog.Logger) h
 	mux.Handle("GET /api/v1/diagnoses", api.auth.middleware(http.HandlerFunc(api.diagnoses)))
 	mux.Handle("POST /api/v1/diagnoses", api.auth.middleware(requireRole("operator", "admin")(http.HandlerFunc(api.createDiagnosis))))
 	mux.Handle("GET /api/v1/agents", api.auth.middleware(http.HandlerFunc(api.agents)))
+	mux.Handle("GET /api/v1/agent-update-packages", api.auth.middleware(http.HandlerFunc(api.agentUpdatePackages)))
+	mux.Handle("POST /api/v1/agent-update-packages", api.auth.middleware(requireRole("admin")(http.HandlerFunc(api.createAgentUpdatePackage))))
+	mux.HandleFunc("GET /api/v1/agent-update-packages/{id}/download", api.downloadAgentUpdatePackage)
+	mux.Handle("POST /api/v1/agents/{id}/updates", api.auth.middleware(requireRole("admin")(http.HandlerFunc(api.queueAgentUpdate))))
+	mux.Handle("POST /api/v1/agents/enrollment-tokens", api.auth.middleware(requireRole("admin")(http.HandlerFunc(api.createAgentEnrollmentToken))))
+	mux.HandleFunc("POST /api/v1/agents/enroll", api.enrollAgent)
 	mux.Handle("GET /api/v1/users", api.auth.middleware(requireRole("admin")(http.HandlerFunc(api.users))))
 	mux.Handle("POST /api/v1/users", api.auth.middleware(requireRole("admin")(http.HandlerFunc(api.createUser))))
 	mux.Handle("GET /api/v1/capabilities", api.auth.middleware(http.HandlerFunc(api.capabilities)))
@@ -860,6 +882,7 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 func (a *API) capabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": []domain.CapabilityStatus{
 		{ID: "agent-grpc", Label: "Agent mTLS/gRPC", State: "available", Detail: "Bidirectional registration, telemetry, heartbeat, gap and tasks"},
+		{ID: "agent-update", Label: "Agent self-update", State: "available", Detail: "Master-cached signed binary downloads and immutable Docker digest pulls", Enhancement: "Activation remains constrained by each Agent's local policy"},
 		{ID: "linux-hwmon", Label: "Linux hwmon/sysfs", State: "available", Detail: "Raw hwmon, PCI, block, network, thermal, power supply and RDMA"},
 		{ID: "smart", Label: "SMART/NVMe/SCSI", State: "available", Detail: "Standby-safe scan-aware smartctl JSON, HBA types, temperatures, attributes and self-tests"},
 		{ID: "zfs", Label: "OpenZFS", State: "available", Detail: "Pool health, capacity and fragmentation"},

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"github.com/monitored-io/monitored/internal/action"
 	"github.com/monitored-io/monitored/internal/adapter/truenas"
 	"github.com/monitored-io/monitored/internal/agent"
+	"github.com/monitored-io/monitored/internal/agentupdate"
 	"github.com/monitored-io/monitored/internal/collector"
 	"github.com/monitored-io/monitored/internal/config"
 	"github.com/monitored-io/monitored/internal/domain"
@@ -41,9 +43,28 @@ func main() {
 	var grpcTransport *agent.GRPCClient
 	actionExecutor := action.Default()
 	actionExecutor.AllowRoot = cfg.AllowRootActions
+	updater := &agentupdate.Updater{
+		Mode: cfg.UpdateMode, InstallPath: cfg.UpdateInstallPath,
+		DockerRestartCommand: cfg.DockerRestartCommand,
+		ScheduleRestart: func(strategy, command string) {
+			go func() {
+				time.Sleep(cfg.UpdateRestartDelay)
+				if strategy == "docker" {
+					process := exec.Command("/bin/sh", "-c", command)
+					if err := process.Start(); err != nil {
+						logger.Error("start locally configured Docker Agent restart", "error", err)
+					}
+					return
+				}
+				logger.Info("restarting after Agent binary update")
+				os.Exit(75)
+			}()
+		},
+	}
 	taskHandler := agent.TaskHandler{
 		Collectors: registry,
 		Actions:    actionExecutor,
+		Updates:    updater,
 		Publish: func(publishContext context.Context, batch domain.IngestBatch) error {
 			if grpcTransport == nil {
 				return nil
@@ -53,12 +74,48 @@ func main() {
 		},
 	}
 	if strings.EqualFold(cfg.Protocol, "grpc") {
+		var managedCredentials *agent.CredentialStore
+		if !cfg.GRPCInsecure {
+			credentialFile := cfg.CredentialFile
+			if credentialFile == "" {
+				credentialFile = filepath.Join(filepath.Dir(cfg.WALPath), "credentials.json")
+			}
+			_, credentialErr := os.Stat(credentialFile)
+			useManagedCredentials := cfg.EnrollmentToken != "" || credentialErr == nil
+			if credentialErr != nil && !os.IsNotExist(credentialErr) {
+				logger.Error("inspect managed Agent credentials", "error", credentialErr)
+				os.Exit(1)
+			}
+			if useManagedCredentials {
+				managedCredentials, credentialErr = agent.OpenCredentialStore(credentialFile)
+				if credentialErr != nil {
+					logger.Error("open managed Agent credentials", "error", credentialErr)
+					os.Exit(1)
+				}
+				if enrolledID := managedCredentials.AgentID(); enrolledID != "" && enrolledID != cfg.Name {
+					logger.Error("managed Agent identity does not match MONITORED_AGENT_NAME", "enrolledAgent", enrolledID, "configuredAgent", cfg.Name)
+					os.Exit(1)
+				}
+				if cfg.EnrollmentToken != "" {
+					managedCredentials.ConfigureEnrollment(agent.EnrollmentOptions{
+						ServerURL: cfg.ServerURL,
+						AgentID:   cfg.Name,
+						Token:     cfg.EnrollmentToken,
+					})
+				}
+			}
+		}
 		grpcTransport = agent.NewGRPCClient(agent.GRPCConfig{
 			Target: cfg.GRPCTarget, AgentID: cfg.Name, StableHostID: stableHostID(cfg),
 			Hostname: cfg.Name, Version: version, CertFile: cfg.TLSCertFile,
 			KeyFile: cfg.TLSKeyFile, CAFile: cfg.TLSCAFile, ServerName: cfg.TLSServerName,
-			Insecure: cfg.GRPCInsecure, Collectors: registry.Names(), Tools: installedTools(),
-			Metadata:    map[string]string{"wal": "bounded-24h-1GiB", "transport": "grpc"},
+			Insecure: cfg.GRPCInsecure, Credentials: managedCredentials,
+			RenewBefore: cfg.CertRenewBefore,
+			Collectors:  registry.Names(), Tools: installedTools(),
+			Metadata: map[string]string{
+				"wal": "bounded-24h-1GiB", "transport": "grpc",
+				"updateMode": cfg.UpdateMode,
+			},
 			TaskHandler: taskHandler.Handle,
 		})
 		if err := grpcTransport.Connect(ctx); err != nil {

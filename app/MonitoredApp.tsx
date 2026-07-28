@@ -112,6 +112,7 @@ type Modal =
   | { type: "suggestion"; suggestion: Suggestion }
   | { type: "action"; action: ActionRequest }
   | { type: "command" }
+  | { type: "notifications" }
   | null;
 
 const queryClient = new QueryClient({
@@ -167,7 +168,14 @@ async function apiRequest(path: string, init?: RequestInit): Promise<Response> {
     throw new APIError("Authentication is required", response.status);
   }
   if (!response.ok) {
-    throw new APIError(`Master returned ${response.status}`, response.status);
+    let message = `Master returned ${response.status}`;
+    try {
+      const payload = (await response.clone().json()) as { error?: { message?: string } };
+      if (payload.error?.message) message = payload.error.message;
+    } catch {
+      // Keep the status-based fallback for non-JSON proxy responses.
+    }
+    throw new APIError(message, response.status);
   }
   return response;
 }
@@ -437,6 +445,8 @@ function MonitoredShell({
           onCommand={() => setModal({ type: "command" })}
           onLanguage={toggleLanguage}
           onDiscover={() => setModal({ type: "discovery" })}
+          onNotifications={() => setModal({ type: "notifications" })}
+          notificationCount={overview.firingAlertCount + overview.pendingActionCount}
           languageLabel={t("language")}
           runtimeMode={runtimeMode}
           canSwitchRuntime={allowRuntimeSwitch}
@@ -589,6 +599,23 @@ function MonitoredShell({
           }}
           onAsset={(asset) => {
             setModal({ type: "asset", asset });
+          }}
+        />
+      )}
+      {modal?.type === "notifications" && (
+        <NotificationCenter
+          runtimeMode={runtimeMode}
+          alertCount={overview.firingAlertCount}
+          pendingActionCount={overview.pendingActionCount}
+          pendingActions={
+            runtimeMode === "demo"
+              ? actionRows.filter((action) => action.state === "pending")
+              : []
+          }
+          onClose={() => setModal(null)}
+          onNavigate={(target) => {
+            navigate(target);
+            setModal(null);
           }}
         />
       )}
@@ -880,6 +907,8 @@ function Topbar({
   onCommand,
   onLanguage,
   onDiscover,
+  onNotifications,
+  notificationCount,
   languageLabel,
   runtimeMode,
   canSwitchRuntime,
@@ -892,6 +921,8 @@ function Topbar({
   onCommand: () => void;
   onLanguage: () => void;
   onDiscover: () => void;
+  onNotifications: () => void;
+  notificationCount: number;
   languageLabel: string;
   runtimeMode: RuntimeMode;
   canSwitchRuntime: boolean;
@@ -939,9 +970,15 @@ function Topbar({
           <Languages size={17} />
           <span>{languageLabel}</span>
         </button>
-        <button className="icon-button notification-button" aria-label="通知">
+        <button
+          className="icon-button notification-button"
+          aria-label={`通知中心，${notificationCount} 个待处理事项`}
+          onClick={onNotifications}
+        >
           <Bell size={18} />
-          <span className="notification-dot" />
+          {notificationCount > 0 && (
+            <span className="notification-count">{notificationCount > 99 ? "99+" : notificationCount}</span>
+          )}
         </button>
         <button className="discover-button" onClick={onDiscover}>
           <ScanSearch size={16} />
@@ -2187,6 +2224,13 @@ function LiveOverviewPage({
 }
 
 function LiveResourcePage({ page }: { page: Exclude<Page, "overview"> }) {
+  if (page === "settings") {
+    return <LiveAgentEnrollmentPage />;
+  }
+  return <LiveGenericResourcePage page={page} />;
+}
+
+function LiveGenericResourcePage({ page }: { page: Exclude<Page, "overview" | "settings"> }) {
   const specification: Record<Exclude<Page, "overview">, { path: string; title: string; kinds?: string[] }> = {
     assets: { path: "/assets", title: "资产" },
     storage: { path: "/assets", title: "TrueNAS / 存储", kinds: ["pool", "disk"] },
@@ -2255,6 +2299,353 @@ function LiveResourcePage({ page }: { page: Exclude<Page, "overview"> }) {
       </section>
     </div>
   );
+}
+
+type AgentEnrollment = {
+  agentId: string;
+  token: string;
+  expiresAt: string;
+  environment: Record<string, string>;
+};
+
+type LiveAgent = {
+  id: string;
+  hostname: string;
+  os: string;
+  architecture: string;
+  version: string;
+  state: string;
+  desiredVersion?: string;
+  lastUpdateStatus?: string;
+  lastUpdateError?: string;
+};
+
+type AgentUpdatePackage = {
+  id: string;
+  version: string;
+  strategy: "binary" | "docker";
+  os: string;
+  architecture: string;
+  fileName?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  image?: string;
+  imageDigest?: string;
+  createdAt: string;
+};
+
+function LiveAgentEnrollmentPage() {
+  const [agentId, setAgentId] = useState("");
+  const [enrollment, setEnrollment] = useState<AgentEnrollment | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [updateStrategy, setUpdateStrategy] = useState<"binary" | "docker">("binary");
+  const [updateVersion, setUpdateVersion] = useState("");
+  const [updateOS, setUpdateOS] = useState("linux");
+  const [updateArchitecture, setUpdateArchitecture] = useState("amd64");
+  const [updateFile, setUpdateFile] = useState<File | null>(null);
+  const [updateImage, setUpdateImage] = useState("");
+  const [updateDigest, setUpdateDigest] = useState("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateTargets, setUpdateTargets] = useState<Record<string, string>>({});
+  const agentsQuery = useQuery({
+    queryKey: ["live-agents"],
+    queryFn: async () => {
+      const response = await apiRequest("/agents");
+      return ((await response.json()) as { items: LiveAgent[] }).items;
+    },
+  });
+  const packagesQuery = useQuery({
+    queryKey: ["agent-update-packages"],
+    queryFn: async () => {
+      const response = await apiRequest("/agent-update-packages");
+      return ((await response.json()) as { items: AgentUpdatePackage[] }).items;
+    },
+  });
+
+  const createEnrollment = async () => {
+    const identity = agentId.trim();
+    if (!identity) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await apiRequest("/agents/enrollment-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: identity }),
+      });
+      setEnrollment((await response.json()) as AgentEnrollment);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "无法创建配对令牌");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const command = enrollment
+    ? `${Object.entries(enrollment.environment)
+        .filter(([, value]) => value)
+        .map(([key, value]) => `${key}=${shellQuote(value)}`)
+        .join(" \\\n")} \\\nmonitored-agent`
+    : "";
+
+  const cacheUpdate = async () => {
+    if (!updateVersion.trim()) return;
+    setUpdateBusy(true);
+    setUpdateError(null);
+    setUpdateMessage(null);
+    try {
+      const form = new FormData();
+      form.set("version", updateVersion.trim());
+      form.set("strategy", updateStrategy);
+      form.set("os", updateOS);
+      form.set("architecture", updateArchitecture);
+      if (updateStrategy === "binary") {
+        if (!updateFile) throw new Error("请选择 Agent 二进制包");
+        form.set("package", updateFile);
+      } else {
+        form.set("image", updateImage.trim());
+        form.set("imageDigest", updateDigest.trim());
+      }
+      const response = await apiRequest("/agent-update-packages", {
+        method: "POST",
+        body: form,
+      });
+      const created = (await response.json()) as AgentUpdatePackage;
+      setUpdateMessage(`已缓存 ${created.version} · ${created.os}/${created.architecture}`);
+      setUpdateVersion("");
+      setUpdateFile(null);
+      await packagesQuery.refetch();
+    } catch (requestError) {
+      setUpdateError(requestError instanceof Error ? requestError.message : "无法缓存更新包");
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const queueUpdate = async (update: AgentUpdatePackage, target: string) => {
+    if (!target) return;
+    setUpdateBusy(true);
+    setUpdateError(null);
+    setUpdateMessage(null);
+    try {
+      const response = await apiRequest(`/agents/${encodeURIComponent(target)}/updates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ packageId: update.id }),
+      });
+      const task = (await response.json()) as { taskId: string };
+      setUpdateMessage(`已向 ${target} 下发 ${update.version}，任务 ${task.taskId.slice(0, 8)}`);
+      await agentsQuery.refetch();
+    } catch (requestError) {
+      setUpdateError(requestError instanceof Error ? requestError.message : "无法下发 Agent 更新");
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  return (
+    <div className="page-stack">
+      <PageHeading
+        eyebrow="ONE-TIME PAIRING · AUTOMATIC MTLS"
+        title="Agent 与证书"
+        description="为设备生成一次性配对令牌；私钥在 Agent 本机生成，证书会在到期前自动换钥续签"
+      />
+      <section className="panel agent-enrollment-panel">
+        <div className="agent-enrollment-intro">
+          <ShieldCheck size={22} />
+          <div>
+            <strong>添加设备</strong>
+            <span>输入稳定且唯一的 Agent ID。配对令牌默认 15 分钟失效且只能使用一次。</span>
+          </div>
+        </div>
+        <div className="agent-enrollment-form">
+          <label className="form-field">
+            <span>Agent ID</span>
+            <input
+              value={agentId}
+              onChange={(event) => setAgentId(event.target.value)}
+              placeholder="edge-01"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <button className="button primary" disabled={busy || !agentId.trim()} onClick={() => void createEnrollment()}>
+            {busy ? <RefreshCw className="spin" size={15} /> : <Plus size={15} />}
+            生成配对命令
+          </button>
+        </div>
+        {error && <div className="agent-enrollment-error"><AlertTriangle size={15} />{error}</div>}
+        {enrollment && (
+          <div className="agent-enrollment-result">
+            <div>
+              <strong>在目标设备上运行</strong>
+              <span>有效期至 {new Date(enrollment.expiresAt).toLocaleString()}</span>
+            </div>
+            <pre>{command}</pre>
+            <button
+              className="button secondary"
+              onClick={() => void navigator.clipboard.writeText(command)}
+            >
+              <ClipboardCheck size={15} /> 复制命令
+            </button>
+            <small>凭据会保存到 Agent 状态目录；配对成功后不再需要保留令牌。</small>
+          </div>
+        )}
+      </section>
+      <section className="panel agent-update-panel">
+        <div className="panel-header">
+          <div>
+            <span>SERVER CACHE · AUDITED ROLLOUT</span>
+            <h3>Agent 自主更新</h3>
+          </div>
+          <ShieldCheck size={18} />
+        </div>
+        <div className="agent-update-explainer">
+          <Info size={17} />
+          <span>二进制包由 Master 缓存并签发短期下载地址；Docker 仅接受带 sha256 摘要的不可变镜像。Agent 仍须在本机明确启用对应更新策略。</span>
+        </div>
+        <div className="agent-update-form">
+          <label className="form-field">
+            <span>方式</span>
+            <select
+              value={updateStrategy}
+              onChange={(event) => {
+                const strategy = event.target.value as "binary" | "docker";
+                setUpdateStrategy(strategy);
+                if (strategy === "docker") setUpdateOS("linux");
+              }}
+            >
+              <option value="binary">Server 二进制包</option>
+              <option value="docker">Docker Pull</option>
+            </select>
+          </label>
+          <label className="form-field">
+            <span>版本</span>
+            <input value={updateVersion} onChange={(event) => setUpdateVersion(event.target.value)} placeholder="0.3.0" />
+          </label>
+          <label className="form-field">
+            <span>OS</span>
+            <select value={updateOS} onChange={(event) => setUpdateOS(event.target.value)}>
+              <option value="linux">Linux</option>
+              <option value="freebsd" disabled={updateStrategy === "docker"}>FreeBSD</option>
+            </select>
+          </label>
+          <label className="form-field">
+            <span>架构</span>
+            <select value={updateArchitecture} onChange={(event) => setUpdateArchitecture(event.target.value)}>
+              <option value="amd64">amd64</option>
+              <option value="arm64">arm64</option>
+            </select>
+          </label>
+          {updateStrategy === "binary" ? (
+            <label className="form-field agent-update-file">
+              <span>Agent 包</span>
+              <input type="file" onChange={(event) => setUpdateFile(event.target.files?.[0] ?? null)} />
+            </label>
+          ) : (
+            <>
+              <label className="form-field agent-update-file">
+                <span>镜像</span>
+                <input value={updateImage} onChange={(event) => setUpdateImage(event.target.value)} placeholder="ghcr.io/example/monitored-agent:0.3.0" />
+              </label>
+              <label className="form-field agent-update-file">
+                <span>镜像摘要</span>
+                <input value={updateDigest} onChange={(event) => setUpdateDigest(event.target.value)} placeholder="sha256:…" />
+              </label>
+            </>
+          )}
+          <button
+            className="button primary"
+            disabled={
+              updateBusy ||
+              !updateVersion.trim() ||
+              (updateStrategy === "binary"
+                ? !updateFile
+                : !updateImage.trim() || (!updateDigest.trim() && !updateImage.includes("@sha256:")))
+            }
+            onClick={() => void cacheUpdate()}
+          >
+            {updateBusy ? <RefreshCw className="spin" size={15} /> : <Download size={15} />}
+            缓存更新
+          </button>
+        </div>
+        {updateError && <div className="agent-enrollment-error"><AlertTriangle size={15} />{updateError}</div>}
+        {updateMessage && <div className="agent-update-message"><CheckCircle2 size={15} />{updateMessage}</div>}
+        <div className="agent-update-inventory">
+          <div className="agent-update-inventory-title">
+            <h4>Agent 状态</h4>
+            <button onClick={() => void agentsQuery.refetch()} aria-label="刷新 Agent 状态"><RefreshCw size={13} /></button>
+          </div>
+          <div className="agent-update-agent-list">
+            {agentsQuery.isLoading && <span>正在读取已注册 Agent…</span>}
+            {agentsQuery.isError && <span>无法读取 Agent 状态。</span>}
+            {agentsQuery.data?.length === 0 && <span>尚无已注册 Agent。</span>}
+            {agentsQuery.data?.map((agent) => (
+              <div key={agent.id}>
+                <span className={`state-dot ${agent.state === "online" ? "healthy" : agent.state === "degraded" ? "warning" : "muted"}`} />
+                <strong>{agent.id}</strong>
+                <code>{agent.os}/{agent.architecture}</code>
+                <span>{agent.version}{agent.desiredVersion && agent.desiredVersion !== agent.version ? ` → ${agent.desiredVersion}` : ""}</span>
+                <StatusPill status={agent.lastUpdateStatus || agent.state} />
+                {agent.lastUpdateError && <small title={agent.lastUpdateError}><AlertTriangle size={12} /> 更新失败</small>}
+              </div>
+            ))}
+          </div>
+          <div className="agent-update-inventory-title packages">
+            <h4>可下发版本</h4>
+          </div>
+          {packagesQuery.isLoading && <span>正在读取 Master 缓存…</span>}
+          {packagesQuery.isError && <span>无法读取 Master 更新缓存。</span>}
+          {packagesQuery.data?.length === 0 && <span>尚未缓存更新包。</span>}
+          {packagesQuery.data?.map((update) => {
+            const targets = (agentsQuery.data ?? []).filter(
+              (agent) => agent.os === update.os && agent.architecture === update.architecture,
+            );
+            const target = updateTargets[update.id] ?? targets[0]?.id ?? "";
+            return (
+              <article className="agent-update-row" key={update.id}>
+                <div className={`agent-update-kind ${update.strategy}`}>
+                  {update.strategy === "binary" ? <Download size={17} /> : <Boxes size={17} />}
+                </div>
+                <div>
+                  <strong>{update.version}</strong>
+                  <span>{update.os}/{update.architecture} · {update.strategy === "binary" ? `${formatBytes(update.sizeBytes ?? 0)} · ${update.sha256?.slice(0, 12)}…` : update.image}</span>
+                </div>
+                <select
+                  value={target}
+                  disabled={targets.length === 0 || updateBusy}
+                  onChange={(event) => setUpdateTargets((values) => ({ ...values, [update.id]: event.target.value }))}
+                >
+                  {targets.length === 0 && <option value="">无匹配 Agent</option>}
+                  {targets.map((agent) => (
+                    <option value={agent.id} key={agent.id}>
+                      {agent.id} · {agent.version} · {agent.lastUpdateStatus || agent.state}
+                    </option>
+                  ))}
+                </select>
+                <button className="button secondary" disabled={!target || updateBusy} onClick={() => void queueUpdate(update, target)}>
+                  <ArrowUpRight size={14} /> 下发
+                </button>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function MetricCard({
@@ -2795,6 +3186,153 @@ function CommandPalette({
         <div className="command-foot"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 打开</span><span>原始名称与稳定 ID 均可搜索</span></div>
       </div>
     </div>
+  );
+}
+
+function NotificationCenter({
+  runtimeMode,
+  alertCount,
+  pendingActionCount,
+  pendingActions,
+  onClose,
+  onNavigate,
+}: {
+  runtimeMode: RuntimeMode;
+  alertCount: number;
+  pendingActionCount: number;
+  pendingActions: ActionRequest[];
+  onClose: () => void;
+  onNavigate: (page: Page) => void;
+}) {
+  const liveQuery = useQuery({
+    queryKey: ["notification-center"],
+    enabled: runtimeMode === "live",
+    queryFn: async () => {
+      const [alertsResponse, actionsResponse] = await Promise.all([
+        apiRequest("/alerts?active=true"),
+        apiRequest("/actions"),
+      ]);
+      const alertPayload = (await alertsResponse.json()) as {
+        items: Array<{
+          id: string;
+          severity: string;
+          state: string;
+          ruleName: string;
+          assetName: string;
+          summary: string;
+          startedAt: string;
+        }>;
+      };
+      const actionPayload = (await actionsResponse.json()) as {
+        items: Array<{
+          id: string;
+          state: string;
+          title: string;
+          assetName: string;
+          requestedAt: string;
+        }>;
+      };
+      return {
+        alerts: alertPayload.items,
+        actions: actionPayload.items.filter((action) => action.state === "pending"),
+      };
+    },
+  });
+  const activeAlerts = runtimeMode === "demo"
+    ? alerts
+        .filter((alert) => alert.state === "Firing" || alert.state === "Pending")
+        .map((alert) => ({
+          ...alert,
+          startedLabel: alert.started,
+        }))
+    : (liveQuery.data?.alerts ?? []).map((alert) => ({
+        ...alert,
+        startedLabel: new Date(alert.startedAt).toLocaleString(),
+      }));
+  const activeActions = runtimeMode === "demo"
+    ? pendingActions.map((action) => ({ ...action, requestedLabel: action.requestedAt }))
+    : (liveQuery.data?.actions ?? []).map((action) => ({
+        ...action,
+        requestedLabel: new Date(action.requestedAt).toLocaleString(),
+      }));
+  const shownAlertCount = runtimeMode === "live" && liveQuery.data ? activeAlerts.length : alertCount;
+  const shownActionCount = runtimeMode === "live" && liveQuery.data ? activeActions.length : runtimeMode === "demo" ? pendingActions.length : pendingActionCount;
+  return (
+    <Drawer onClose={onClose}>
+      <div className="modal-heading notification-center-heading">
+        <div className="modal-icon risk-high"><Bell size={20} /></div>
+        <div>
+          <span>需要关注</span>
+          <h2>通知中心</h2>
+          <p>告警、审批和通知投递状态集中在这里。</p>
+        </div>
+      </div>
+      <div className="notification-summary">
+        <button onClick={() => onNavigate("alerts")}>
+          <Bell size={17} />
+          <span>活动告警</span>
+          <strong>{shownAlertCount}</strong>
+        </button>
+        <button onClick={() => onNavigate("actions")}>
+          <ClipboardCheck size={17} />
+          <span>待审批</span>
+          <strong>{shownActionCount}</strong>
+        </button>
+      </div>
+      <h3 className="drawer-section-title">最近事项</h3>
+      <div className="notification-feed">
+        {activeAlerts.map((alert) => (
+          <button key={alert.id} onClick={() => onNavigate("alerts")}>
+            <span className={`notification-severity ${alert.severity}`}><AlertTriangle size={16} /></span>
+            <span>
+              <strong>{alert.ruleName}</strong>
+              <small>{alert.assetName} · {alert.startedLabel}</small>
+              <em>{alert.summary}</em>
+            </span>
+            <ChevronRight size={15} />
+          </button>
+        ))}
+        {activeActions.map((action) => (
+          <button key={action.id} onClick={() => onNavigate("actions")}>
+            <span className="notification-severity action"><ClipboardCheck size={16} /></span>
+            <span>
+              <strong>{action.title}</strong>
+              <small>{action.assetName} · {action.requestedLabel}</small>
+              <em>等待管理员审批后才能执行</em>
+            </span>
+            <ChevronRight size={15} />
+          </button>
+        ))}
+        {runtimeMode === "live" && liveQuery.isLoading && (
+          <div className="notification-empty">
+            <RefreshCw className="spin" size={22} />
+            <strong>正在读取通知中心</strong>
+          </div>
+        )}
+        {runtimeMode === "live" && liveQuery.isError && (
+          <div className="notification-empty">
+            <AlertTriangle size={22} />
+            <strong>无法读取最近事项</strong>
+            <button className="button secondary" onClick={() => void liveQuery.refetch()}>重试</button>
+          </div>
+        )}
+        {runtimeMode === "live" && liveQuery.isSuccess && shownAlertCount === 0 && shownActionCount === 0 && (
+          <div className="notification-empty">
+            <CheckCircle2 size={22} />
+            <strong>当前没有待处理事项</strong>
+            <span>新的告警或审批请求会显示在这里。</span>
+          </div>
+        )}
+      </div>
+      <div className="drawer-actions notification-actions">
+        <button className="button secondary" onClick={() => onNavigate("notifications")}>
+          <Send size={15} /> 通知渠道
+        </button>
+        <button className="button primary" onClick={() => onNavigate("alerts")}>
+          <Bell size={15} /> 查看全部告警
+        </button>
+      </div>
+    </Drawer>
   );
 }
 

@@ -35,6 +35,7 @@ type AgentEnvelope struct {
 	//	*AgentEnvelope_TaskResult
 	//	*AgentEnvelope_Heartbeat
 	//	*AgentEnvelope_Gap
+	//	*AgentEnvelope_CertificateSigningRequest
 	Payload       isAgentEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -161,6 +162,15 @@ func (x *AgentEnvelope) GetGap() *GapReport {
 	return nil
 }
 
+func (x *AgentEnvelope) GetCertificateSigningRequest() *CertificateSigningRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEnvelope_CertificateSigningRequest); ok {
+			return x.CertificateSigningRequest
+		}
+	}
+	return nil
+}
+
 type isAgentEnvelope_Payload interface {
 	isAgentEnvelope_Payload()
 }
@@ -193,6 +203,10 @@ type AgentEnvelope_Gap struct {
 	Gap *GapReport `protobuf:"bytes,16,opt,name=gap,proto3,oneof"`
 }
 
+type AgentEnvelope_CertificateSigningRequest struct {
+	CertificateSigningRequest *CertificateSigningRequest `protobuf:"bytes,17,opt,name=certificate_signing_request,json=certificateSigningRequest,proto3,oneof"`
+}
+
 func (*AgentEnvelope_Registration) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_Capabilities) isAgentEnvelope_Payload() {}
@@ -207,6 +221,8 @@ func (*AgentEnvelope_Heartbeat) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_Gap) isAgentEnvelope_Payload() {}
 
+func (*AgentEnvelope_CertificateSigningRequest) isAgentEnvelope_Payload() {}
+
 type MasterEnvelope struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	MessageId    string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
@@ -217,6 +233,8 @@ type MasterEnvelope struct {
 	//	*MasterEnvelope_Diagnostic
 	//	*MasterEnvelope_Action
 	//	*MasterEnvelope_Acknowledgement
+	//	*MasterEnvelope_CertificateBundle
+	//	*MasterEnvelope_Update
 	Payload       isMasterEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -309,6 +327,24 @@ func (x *MasterEnvelope) GetAcknowledgement() *Acknowledgement {
 	return nil
 }
 
+func (x *MasterEnvelope) GetCertificateBundle() *CertificateBundle {
+	if x != nil {
+		if x, ok := x.Payload.(*MasterEnvelope_CertificateBundle); ok {
+			return x.CertificateBundle
+		}
+	}
+	return nil
+}
+
+func (x *MasterEnvelope) GetUpdate() *AgentUpdateTask {
+	if x != nil {
+		if x, ok := x.Payload.(*MasterEnvelope_Update); ok {
+			return x.Update
+		}
+	}
+	return nil
+}
+
 type isMasterEnvelope_Payload interface {
 	isMasterEnvelope_Payload()
 }
@@ -329,6 +365,14 @@ type MasterEnvelope_Acknowledgement struct {
 	Acknowledgement *Acknowledgement `protobuf:"bytes,13,opt,name=acknowledgement,proto3,oneof"`
 }
 
+type MasterEnvelope_CertificateBundle struct {
+	CertificateBundle *CertificateBundle `protobuf:"bytes,14,opt,name=certificate_bundle,json=certificateBundle,proto3,oneof"`
+}
+
+type MasterEnvelope_Update struct {
+	Update *AgentUpdateTask `protobuf:"bytes,15,opt,name=update,proto3,oneof"`
+}
+
 func (*MasterEnvelope_Discovery) isMasterEnvelope_Payload() {}
 
 func (*MasterEnvelope_Diagnostic) isMasterEnvelope_Payload() {}
@@ -336,6 +380,10 @@ func (*MasterEnvelope_Diagnostic) isMasterEnvelope_Payload() {}
 func (*MasterEnvelope_Action) isMasterEnvelope_Payload() {}
 
 func (*MasterEnvelope_Acknowledgement) isMasterEnvelope_Payload() {}
+
+func (*MasterEnvelope_CertificateBundle) isMasterEnvelope_Payload() {}
+
+func (*MasterEnvelope_Update) isMasterEnvelope_Payload() {}
 
 type Registration struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1453,11 +1501,255 @@ func (x *Acknowledgement) GetMessageId() string {
 	return ""
 }
 
+type CertificateSigningRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	CsrPem        []byte                 `protobuf:"bytes,2,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CertificateSigningRequest) Reset() {
+	*x = CertificateSigningRequest{}
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertificateSigningRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertificateSigningRequest) ProtoMessage() {}
+
+func (x *CertificateSigningRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertificateSigningRequest.ProtoReflect.Descriptor instead.
+func (*CertificateSigningRequest) Descriptor() ([]byte, []int) {
+	return file_proto_monitored_v1_agent_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CertificateSigningRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *CertificateSigningRequest) GetCsrPem() []byte {
+	if x != nil {
+		return x.CsrPem
+	}
+	return nil
+}
+
+type CertificateBundle struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RequestId      string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	CertificatePem []byte                 `protobuf:"bytes,2,opt,name=certificate_pem,json=certificatePem,proto3" json:"certificate_pem,omitempty"`
+	CaPem          []byte                 `protobuf:"bytes,3,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
+	NotAfterUnixMs int64                  `protobuf:"varint,4,opt,name=not_after_unix_ms,json=notAfterUnixMs,proto3" json:"not_after_unix_ms,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CertificateBundle) Reset() {
+	*x = CertificateBundle{}
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertificateBundle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertificateBundle) ProtoMessage() {}
+
+func (x *CertificateBundle) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertificateBundle.ProtoReflect.Descriptor instead.
+func (*CertificateBundle) Descriptor() ([]byte, []int) {
+	return file_proto_monitored_v1_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *CertificateBundle) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *CertificateBundle) GetCertificatePem() []byte {
+	if x != nil {
+		return x.CertificatePem
+	}
+	return nil
+}
+
+func (x *CertificateBundle) GetCaPem() []byte {
+	if x != nil {
+		return x.CaPem
+	}
+	return nil
+}
+
+func (x *CertificateBundle) GetNotAfterUnixMs() int64 {
+	if x != nil {
+		return x.NotAfterUnixMs
+	}
+	return 0
+}
+
+type AgentUpdateTask struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	PackageId     string                 `protobuf:"bytes,2,opt,name=package_id,json=packageId,proto3" json:"package_id,omitempty"`
+	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	Strategy      string                 `protobuf:"bytes,4,opt,name=strategy,proto3" json:"strategy,omitempty"`
+	TargetOs      string                 `protobuf:"bytes,5,opt,name=target_os,json=targetOs,proto3" json:"target_os,omitempty"`
+	Architecture  string                 `protobuf:"bytes,6,opt,name=architecture,proto3" json:"architecture,omitempty"`
+	DownloadUrl   string                 `protobuf:"bytes,7,opt,name=download_url,json=downloadUrl,proto3" json:"download_url,omitempty"`
+	Sha256        string                 `protobuf:"bytes,8,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	SizeBytes     int64                  `protobuf:"varint,9,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	Image         string                 `protobuf:"bytes,10,opt,name=image,proto3" json:"image,omitempty"`
+	ImageDigest   string                 `protobuf:"bytes,11,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentUpdateTask) Reset() {
+	*x = AgentUpdateTask{}
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentUpdateTask) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentUpdateTask) ProtoMessage() {}
+
+func (x *AgentUpdateTask) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_monitored_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentUpdateTask.ProtoReflect.Descriptor instead.
+func (*AgentUpdateTask) Descriptor() ([]byte, []int) {
+	return file_proto_monitored_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *AgentUpdateTask) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetPackageId() string {
+	if x != nil {
+		return x.PackageId
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetStrategy() string {
+	if x != nil {
+		return x.Strategy
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetTargetOs() string {
+	if x != nil {
+		return x.TargetOs
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetArchitecture() string {
+	if x != nil {
+		return x.Architecture
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetDownloadUrl() string {
+	if x != nil {
+		return x.DownloadUrl
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *AgentUpdateTask) GetImage() string {
+	if x != nil {
+		return x.Image
+	}
+	return ""
+}
+
+func (x *AgentUpdateTask) GetImageDigest() string {
+	if x != nil {
+		return x.ImageDigest
+	}
+	return ""
+}
+
 var File_proto_monitored_v1_agent_proto protoreflect.FileDescriptor
 
 const file_proto_monitored_v1_agent_proto_rawDesc = "" +
 	"\n" +
-	"\x1eproto/monitored/v1/agent.proto\x12\fmonitored.v1\"\xa5\x04\n" +
+	"\x1eproto/monitored/v1/agent.proto\x12\fmonitored.v1\"\x90\x05\n" +
 	"\rAgentEnvelope\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12\x1d\n" +
 	"\n" +
@@ -1471,8 +1763,9 @@ const file_proto_monitored_v1_agent_proto_rawDesc = "" +
 	"\vtask_result\x18\x0e \x01(\v2\x18.monitored.v1.TaskResultH\x00R\n" +
 	"taskResult\x127\n" +
 	"\theartbeat\x18\x0f \x01(\v2\x17.monitored.v1.HeartbeatH\x00R\theartbeat\x12+\n" +
-	"\x03gap\x18\x10 \x01(\v2\x17.monitored.v1.GapReportH\x00R\x03gapB\t\n" +
-	"\apayload\"\xe1\x02\n" +
+	"\x03gap\x18\x10 \x01(\v2\x17.monitored.v1.GapReportH\x00R\x03gap\x12i\n" +
+	"\x1bcertificate_signing_request\x18\x11 \x01(\v2'.monitored.v1.CertificateSigningRequestH\x00R\x19certificateSigningRequestB\t\n" +
+	"\apayload\"\xec\x03\n" +
 	"\x0eMasterEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12%\n" +
@@ -1483,7 +1776,9 @@ const file_proto_monitored_v1_agent_proto_rawDesc = "" +
 	"diagnostic\x18\v \x01(\v2\x1c.monitored.v1.DiagnosticTaskH\x00R\n" +
 	"diagnostic\x126\n" +
 	"\x06action\x18\f \x01(\v2\x1c.monitored.v1.ApprovedActionH\x00R\x06action\x12I\n" +
-	"\x0facknowledgement\x18\r \x01(\v2\x1d.monitored.v1.AcknowledgementH\x00R\x0facknowledgementB\t\n" +
+	"\x0facknowledgement\x18\r \x01(\v2\x1d.monitored.v1.AcknowledgementH\x00R\x0facknowledgement\x12P\n" +
+	"\x12certificate_bundle\x18\x0e \x01(\v2\x1f.monitored.v1.CertificateBundleH\x00R\x11certificateBundle\x127\n" +
+	"\x06update\x18\x0f \x01(\v2\x1d.monitored.v1.AgentUpdateTaskH\x00R\x06updateB\t\n" +
 	"\apayload\"\x9e\x01\n" +
 	"\fRegistration\x12$\n" +
 	"\x0estable_host_id\x18\x01 \x01(\tR\fstableHostId\x12\x1a\n" +
@@ -1598,7 +1893,32 @@ const file_proto_monitored_v1_agent_proto_rawDesc = "" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\"0\n" +
 	"\x0fAcknowledgement\x12\x1d\n" +
 	"\n" +
-	"message_id\x18\x01 \x01(\tR\tmessageId2X\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\"S\n" +
+	"\x19CertificateSigningRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\acsr_pem\x18\x02 \x01(\fR\x06csrPem\"\x9d\x01\n" +
+	"\x11CertificateBundle\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12'\n" +
+	"\x0fcertificate_pem\x18\x02 \x01(\fR\x0ecertificatePem\x12\x15\n" +
+	"\x06ca_pem\x18\x03 \x01(\fR\x05caPem\x12)\n" +
+	"\x11not_after_unix_ms\x18\x04 \x01(\x03R\x0enotAfterUnixMs\"\xd3\x02\n" +
+	"\x0fAgentUpdateTask\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"package_id\x18\x02 \x01(\tR\tpackageId\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12\x1a\n" +
+	"\bstrategy\x18\x04 \x01(\tR\bstrategy\x12\x1b\n" +
+	"\ttarget_os\x18\x05 \x01(\tR\btargetOs\x12\"\n" +
+	"\farchitecture\x18\x06 \x01(\tR\farchitecture\x12!\n" +
+	"\fdownload_url\x18\a \x01(\tR\vdownloadUrl\x12\x16\n" +
+	"\x06sha256\x18\b \x01(\tR\x06sha256\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\t \x01(\x03R\tsizeBytes\x12\x14\n" +
+	"\x05image\x18\n" +
+	" \x01(\tR\x05image\x12!\n" +
+	"\fimage_digest\x18\v \x01(\tR\vimageDigest2X\n" +
 	"\fAgentControl\x12H\n" +
 	"\aConnect\x12\x1b.monitored.v1.AgentEnvelope\x1a\x1c.monitored.v1.MasterEnvelope(\x010\x01B@Z>github.com/monitored-io/monitored/gen/monitored/v1;monitoredv1b\x06proto3"
 
@@ -1614,29 +1934,32 @@ func file_proto_monitored_v1_agent_proto_rawDescGZIP() []byte {
 	return file_proto_monitored_v1_agent_proto_rawDescData
 }
 
-var file_proto_monitored_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_proto_monitored_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_proto_monitored_v1_agent_proto_goTypes = []any{
-	(*AgentEnvelope)(nil),      // 0: monitored.v1.AgentEnvelope
-	(*MasterEnvelope)(nil),     // 1: monitored.v1.MasterEnvelope
-	(*Registration)(nil),       // 2: monitored.v1.Registration
-	(*CapabilityManifest)(nil), // 3: monitored.v1.CapabilityManifest
-	(*AssetSnapshot)(nil),      // 4: monitored.v1.AssetSnapshot
-	(*Asset)(nil),              // 5: monitored.v1.Asset
-	(*SensorDefinition)(nil),   // 6: monitored.v1.SensorDefinition
-	(*SampleBatch)(nil),        // 7: monitored.v1.SampleBatch
-	(*Sample)(nil),             // 8: monitored.v1.Sample
-	(*DiscoveryTask)(nil),      // 9: monitored.v1.DiscoveryTask
-	(*ScanPorts)(nil),          // 10: monitored.v1.ScanPorts
-	(*DiagnosticTask)(nil),     // 11: monitored.v1.DiagnosticTask
-	(*ApprovedAction)(nil),     // 12: monitored.v1.ApprovedAction
-	(*TaskResult)(nil),         // 13: monitored.v1.TaskResult
-	(*Heartbeat)(nil),          // 14: monitored.v1.Heartbeat
-	(*GapReport)(nil),          // 15: monitored.v1.GapReport
-	(*Acknowledgement)(nil),    // 16: monitored.v1.Acknowledgement
-	nil,                        // 17: monitored.v1.CapabilityManifest.MetadataEntry
-	nil,                        // 18: monitored.v1.Asset.MetadataEntry
-	nil,                        // 19: monitored.v1.SensorDefinition.MetadataEntry
-	nil,                        // 20: monitored.v1.ApprovedAction.EnvironmentEntry
+	(*AgentEnvelope)(nil),             // 0: monitored.v1.AgentEnvelope
+	(*MasterEnvelope)(nil),            // 1: monitored.v1.MasterEnvelope
+	(*Registration)(nil),              // 2: monitored.v1.Registration
+	(*CapabilityManifest)(nil),        // 3: monitored.v1.CapabilityManifest
+	(*AssetSnapshot)(nil),             // 4: monitored.v1.AssetSnapshot
+	(*Asset)(nil),                     // 5: monitored.v1.Asset
+	(*SensorDefinition)(nil),          // 6: monitored.v1.SensorDefinition
+	(*SampleBatch)(nil),               // 7: monitored.v1.SampleBatch
+	(*Sample)(nil),                    // 8: monitored.v1.Sample
+	(*DiscoveryTask)(nil),             // 9: monitored.v1.DiscoveryTask
+	(*ScanPorts)(nil),                 // 10: monitored.v1.ScanPorts
+	(*DiagnosticTask)(nil),            // 11: monitored.v1.DiagnosticTask
+	(*ApprovedAction)(nil),            // 12: monitored.v1.ApprovedAction
+	(*TaskResult)(nil),                // 13: monitored.v1.TaskResult
+	(*Heartbeat)(nil),                 // 14: monitored.v1.Heartbeat
+	(*GapReport)(nil),                 // 15: monitored.v1.GapReport
+	(*Acknowledgement)(nil),           // 16: monitored.v1.Acknowledgement
+	(*CertificateSigningRequest)(nil), // 17: monitored.v1.CertificateSigningRequest
+	(*CertificateBundle)(nil),         // 18: monitored.v1.CertificateBundle
+	(*AgentUpdateTask)(nil),           // 19: monitored.v1.AgentUpdateTask
+	nil,                               // 20: monitored.v1.CapabilityManifest.MetadataEntry
+	nil,                               // 21: monitored.v1.Asset.MetadataEntry
+	nil,                               // 22: monitored.v1.SensorDefinition.MetadataEntry
+	nil,                               // 23: monitored.v1.ApprovedAction.EnvironmentEntry
 }
 var file_proto_monitored_v1_agent_proto_depIdxs = []int32{
 	2,  // 0: monitored.v1.AgentEnvelope.registration:type_name -> monitored.v1.Registration
@@ -1646,25 +1969,28 @@ var file_proto_monitored_v1_agent_proto_depIdxs = []int32{
 	13, // 4: monitored.v1.AgentEnvelope.task_result:type_name -> monitored.v1.TaskResult
 	14, // 5: monitored.v1.AgentEnvelope.heartbeat:type_name -> monitored.v1.Heartbeat
 	15, // 6: monitored.v1.AgentEnvelope.gap:type_name -> monitored.v1.GapReport
-	9,  // 7: monitored.v1.MasterEnvelope.discovery:type_name -> monitored.v1.DiscoveryTask
-	11, // 8: monitored.v1.MasterEnvelope.diagnostic:type_name -> monitored.v1.DiagnosticTask
-	12, // 9: monitored.v1.MasterEnvelope.action:type_name -> monitored.v1.ApprovedAction
-	16, // 10: monitored.v1.MasterEnvelope.acknowledgement:type_name -> monitored.v1.Acknowledgement
-	17, // 11: monitored.v1.CapabilityManifest.metadata:type_name -> monitored.v1.CapabilityManifest.MetadataEntry
-	5,  // 12: monitored.v1.AssetSnapshot.assets:type_name -> monitored.v1.Asset
-	6,  // 13: monitored.v1.AssetSnapshot.sensors:type_name -> monitored.v1.SensorDefinition
-	18, // 14: monitored.v1.Asset.metadata:type_name -> monitored.v1.Asset.MetadataEntry
-	19, // 15: monitored.v1.SensorDefinition.metadata:type_name -> monitored.v1.SensorDefinition.MetadataEntry
-	8,  // 16: monitored.v1.SampleBatch.samples:type_name -> monitored.v1.Sample
-	10, // 17: monitored.v1.DiscoveryTask.scan_ports:type_name -> monitored.v1.ScanPorts
-	20, // 18: monitored.v1.ApprovedAction.environment:type_name -> monitored.v1.ApprovedAction.EnvironmentEntry
-	0,  // 19: monitored.v1.AgentControl.Connect:input_type -> monitored.v1.AgentEnvelope
-	1,  // 20: monitored.v1.AgentControl.Connect:output_type -> monitored.v1.MasterEnvelope
-	20, // [20:21] is the sub-list for method output_type
-	19, // [19:20] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	17, // 7: monitored.v1.AgentEnvelope.certificate_signing_request:type_name -> monitored.v1.CertificateSigningRequest
+	9,  // 8: monitored.v1.MasterEnvelope.discovery:type_name -> monitored.v1.DiscoveryTask
+	11, // 9: monitored.v1.MasterEnvelope.diagnostic:type_name -> monitored.v1.DiagnosticTask
+	12, // 10: monitored.v1.MasterEnvelope.action:type_name -> monitored.v1.ApprovedAction
+	16, // 11: monitored.v1.MasterEnvelope.acknowledgement:type_name -> monitored.v1.Acknowledgement
+	18, // 12: monitored.v1.MasterEnvelope.certificate_bundle:type_name -> monitored.v1.CertificateBundle
+	19, // 13: monitored.v1.MasterEnvelope.update:type_name -> monitored.v1.AgentUpdateTask
+	20, // 14: monitored.v1.CapabilityManifest.metadata:type_name -> monitored.v1.CapabilityManifest.MetadataEntry
+	5,  // 15: monitored.v1.AssetSnapshot.assets:type_name -> monitored.v1.Asset
+	6,  // 16: monitored.v1.AssetSnapshot.sensors:type_name -> monitored.v1.SensorDefinition
+	21, // 17: monitored.v1.Asset.metadata:type_name -> monitored.v1.Asset.MetadataEntry
+	22, // 18: monitored.v1.SensorDefinition.metadata:type_name -> monitored.v1.SensorDefinition.MetadataEntry
+	8,  // 19: monitored.v1.SampleBatch.samples:type_name -> monitored.v1.Sample
+	10, // 20: monitored.v1.DiscoveryTask.scan_ports:type_name -> monitored.v1.ScanPorts
+	23, // 21: monitored.v1.ApprovedAction.environment:type_name -> monitored.v1.ApprovedAction.EnvironmentEntry
+	0,  // 22: monitored.v1.AgentControl.Connect:input_type -> monitored.v1.AgentEnvelope
+	1,  // 23: monitored.v1.AgentControl.Connect:output_type -> monitored.v1.MasterEnvelope
+	23, // [23:24] is the sub-list for method output_type
+	22, // [22:23] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_proto_monitored_v1_agent_proto_init() }
@@ -1680,12 +2006,15 @@ func file_proto_monitored_v1_agent_proto_init() {
 		(*AgentEnvelope_TaskResult)(nil),
 		(*AgentEnvelope_Heartbeat)(nil),
 		(*AgentEnvelope_Gap)(nil),
+		(*AgentEnvelope_CertificateSigningRequest)(nil),
 	}
 	file_proto_monitored_v1_agent_proto_msgTypes[1].OneofWrappers = []any{
 		(*MasterEnvelope_Discovery)(nil),
 		(*MasterEnvelope_Diagnostic)(nil),
 		(*MasterEnvelope_Action)(nil),
 		(*MasterEnvelope_Acknowledgement)(nil),
+		(*MasterEnvelope_CertificateBundle)(nil),
+		(*MasterEnvelope_Update)(nil),
 	}
 	file_proto_monitored_v1_agent_proto_msgTypes[8].OneofWrappers = []any{}
 	type x struct{}
@@ -1694,7 +2023,7 @@ func file_proto_monitored_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_monitored_v1_agent_proto_rawDesc), len(file_proto_monitored_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

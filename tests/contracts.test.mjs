@@ -23,6 +23,9 @@ test("OpenAPI contract exposes the implemented control-plane surface", async () 
     "/api/v1/actions/{id}/decision",
     "/api/v1/auth/totp/enroll",
     "/api/v1/auth/totp/confirm",
+    "/api/v1/agent-update-packages",
+    "/api/v1/agent-update-packages/{id}/download",
+    "/api/v1/agents/{id}/updates",
     "/api/v1/audit",
     "/api/v1/ingest",
   ]) {

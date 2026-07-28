@@ -20,6 +20,7 @@ message AgentEnvelope {
     TaskResult task_result = 14;
     Heartbeat heartbeat = 15;
     GapReport gap = 16;
+    CertificateSigningRequest certificate_signing_request = 17;
   }
 }
 
@@ -31,6 +32,8 @@ message MasterEnvelope {
     DiagnosticTask diagnostic = 11;
     ApprovedAction action = 12;
     Acknowledgement acknowledgement = 13;
+    CertificateBundle certificate_bundle = 14;
+    AgentUpdateTask update = 15;
   }
 }
 
@@ -149,4 +152,30 @@ message GapReport {
 
 message Acknowledgement {
   string message_id = 1;
+}
+
+message CertificateSigningRequest {
+  string request_id = 1;
+  bytes csr_pem = 2;
+}
+
+message CertificateBundle {
+  string request_id = 1;
+  bytes certificate_pem = 2;
+  bytes ca_pem = 3;
+  int64 not_after_unix_ms = 4;
+}
+
+message AgentUpdateTask {
+  string task_id = 1;
+  string package_id = 2;
+  string version = 3;
+  string strategy = 4;
+  string target_os = 5;
+  string architecture = 6;
+  string download_url = 7;
+  string sha256 = 8;
+  int64 size_bytes = 9;
+  string image = 10;
+  string image_digest = 11;
 }

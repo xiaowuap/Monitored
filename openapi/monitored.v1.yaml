@@ -1,11 +1,12 @@
 openapi: 3.1.0
 info:
   title: Monitored API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     REST contract for the device-telemetry-first Monitored control plane.
-    Browser endpoints use the signed `monitored_session` cookie; agents use a
-    dedicated bearer token on the ingest endpoint.
+    Browser endpoints use the signed `monitored_session` cookie. Agents use a
+    single-use pairing token to obtain mTLS credentials; a dedicated bearer
+    token remains available only on the compatibility ingest endpoint.
 servers:
   - url: http://localhost:8080
     description: Local Compose
@@ -705,10 +706,203 @@ paths:
       operationId: listAgents
       responses:
         "200":
-          description: Registered Agents, certificate identity, capabilities, WAL and gap state.
+          description: Registered Agents, certificate identity, capabilities, WAL, gap and update state.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/GenericList" }
+              schema: { $ref: "#/components/schemas/AgentList" }
+  /api/v1/agent-update-packages:
+    get:
+      tags: [Governance]
+      operationId: listAgentUpdatePackages
+      description: Lists server-cached binary packages and immutable Docker image manifests.
+      responses:
+        "200":
+          description: Cached Agent update manifests.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AgentUpdatePackage" }
+                  count: { type: integer }
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    post:
+      tags: [Governance]
+      operationId: createAgentUpdatePackage
+      description: Admin-only. Caches a target-specific binary or an immutable Docker image reference.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version, strategy, os, architecture]
+              properties:
+                version: { type: string, maxLength: 255 }
+                strategy: { type: string, enum: [binary, docker] }
+                os: { type: string, enum: [linux, freebsd] }
+                architecture: { type: string, enum: [amd64, arm64] }
+                package:
+                  type: string
+                  format: binary
+                  description: Required for the binary strategy.
+                image:
+                  type: string
+                  description: Required for the docker strategy.
+                imageDigest:
+                  type: string
+                  pattern: '^sha256:[a-fA-F0-9]{64}$'
+                  description: Required unless the image already contains an @sha256 digest.
+      responses:
+        "201":
+          description: Update manifest cached and appended to the audit chain.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentUpdatePackage" }
+        "400":
+          description: Target, package, digest, or size is invalid.
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/agent-update-packages/{id}/download:
+    get:
+      tags: [Governance]
+      operationId: downloadAgentUpdatePackage
+      security: []
+      description: Short-lived HMAC-signed package download used by an authenticated Agent update task.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{32}$' }
+        - name: expires
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Cached Agent binary.
+          headers:
+            X-Checksum-SHA256:
+              schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/agents/{id}/updates:
+    post:
+      tags: [Governance]
+      operationId: queueAgentUpdate
+      description: Admin-only. Queues a target-matched update over the existing mTLS Agent task stream.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [packageId]
+              properties:
+                packageId: { type: string, pattern: '^[a-f0-9]{32}$' }
+      responses:
+        "202":
+          description: Update queued and appended to the audit chain.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/agents/enrollment-tokens:
+    post:
+      tags: [Governance]
+      operationId: createAgentEnrollmentToken
+      description: Creates an Admin-only, Agent-ID-bound, single-use enrollment token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [agentId]
+              properties:
+                agentId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$|^[A-Za-z0-9]$'
+      responses:
+        "201":
+          description: One-time token and Agent startup environment. The plaintext token is not stored by Master.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agentId, token, expiresAt, environment]
+                properties:
+                  agentId: { type: string }
+                  token: { type: string, writeOnly: true }
+                  expiresAt: { type: string, format: date-time }
+                  environment: { type: object, additionalProperties: { type: string } }
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/agents/enroll:
+    post:
+      tags: [Auth]
+      operationId: enrollAgent
+      security: []
+      description: Exchanges an Agent-generated CSR and one-time token for a short-lived mTLS client certificate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [agentId, token, csrPem]
+              properties:
+                agentId: { type: string, maxLength: 128 }
+                token: { type: string, writeOnly: true }
+                csrPem: { type: string, writeOnly: true, maxLength: 65536 }
+      responses:
+        "201":
+          description: Agent certificate and public CA bundle.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agentId, certificatePem, caPem, serial, notAfter]
+                properties:
+                  agentId: { type: string }
+                  certificatePem: { type: string }
+                  caPem: { type: string }
+                  serial: { type: string }
+                  notAfter: { type: string, format: date-time }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
   /api/v1/users:
     get:
       tags: [Governance]
@@ -978,6 +1172,49 @@ components:
           type: array
           items: { type: object, additionalProperties: true }
         count: { type: integer }
+    AgentList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Agent" }
+        count: { type: integer }
+    Agent:
+      type: object
+      additionalProperties: false
+      required:
+        [id, stableHostId, hostname, os, architecture, version, state,
+         capabilities, tools, metadata, lastSeenAt, walBytes, registeredAt]
+      properties:
+        id: { type: string }
+        stableHostId: { type: string }
+        hostname: { type: string }
+        os: { type: string }
+        architecture: { type: string }
+        version: { type: string }
+        state: { type: string, enum: [online, degraded, offline, revoked] }
+        certificateId: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        lastSeenAt: { type: string, format: date-time }
+        walBytes: { type: integer, format: int64 }
+        oldestWalAt: { type: string, format: date-time }
+        lastGapFrom: { type: string, format: date-time }
+        lastGapTo: { type: string, format: date-time }
+        lastGapReason: { type: string }
+        registeredAt: { type: string, format: date-time }
+        desiredVersion: { type: string }
+        lastUpdateStatus:
+          type: string
+          enum: [queued, dispatched, restart_pending, staged, succeeded, failed]
+        lastUpdateAt: { type: string, format: date-time }
+        lastUpdateError: { type: string }
     RuleInput:
       type: object
       additionalProperties: false
@@ -1070,6 +1307,24 @@ components:
           type: array
           maxItems: 20000
           items: { $ref: "#/components/schemas/IngestSample" }
+    AgentUpdatePackage:
+      type: object
+      additionalProperties: false
+      required: [id, version, strategy, os, architecture, createdAt, createdBy]
+      properties:
+        id: { type: string, pattern: '^[a-f0-9]{32}$' }
+        version: { type: string }
+        strategy: { type: string, enum: [binary, docker] }
+        os: { type: string, enum: [linux, freebsd] }
+        architecture: { type: string, enum: [amd64, arm64] }
+        fileName: { type: string }
+        contentType: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        image: { type: string }
+        imageDigest: { type: string, pattern: '^sha256:[a-fA-F0-9]{64}$' }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
     Error:
       type: object
       required: [error]

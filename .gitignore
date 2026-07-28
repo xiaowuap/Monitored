@@ -13,3 +13,4 @@ tsconfig.tsbuildinfo
 *.db-wal
 .DS_Store
 secrets/
+data/

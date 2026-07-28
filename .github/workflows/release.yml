@@ -86,12 +86,21 @@ jobs:
           npx tsc --noEmit
 
   binaries:
-    name: Linux binaries / ${{ matrix.arch }}
+    name: Binaries / ${{ matrix.os }}-${{ matrix.arch }}
     needs: [prepare, test]
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - os: linux
+            arch: amd64
+            full: "true"
+          - os: linux
+            arch: arm64
+            full: "true"
+          - os: freebsd
+            arch: amd64
+            full: "false"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -102,30 +111,40 @@ jobs:
           cache-dependency-path: go.sum
       - name: Build archives
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
           VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_FULL: ${{ matrix.full }}
         shell: bash
         run: |
           set -euo pipefail
-          full_name="monitored_${VERSION}_linux_${GOARCH}"
-          agent_name="monitored-agent_${VERSION}_linux_${GOARCH}"
-          full_dir="dist/${full_name}"
+          agent_name="monitored-agent_${VERSION}_${GOOS}_${GOARCH}"
           agent_dir="dist/${agent_name}"
-          mkdir -p "${full_dir}/bin" "${agent_dir}"
-          go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-server" ./cmd/server
-          go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-worker" ./cmd/worker
-          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "${full_dir}/bin/monitored-agent" ./cmd/agent
-          install -m 0755 "${full_dir}/bin/monitored-agent" "${agent_dir}/monitored-agent"
-          cp -a profiles docs deploy scripts LICENSE VERSION release.env.example compose.release.yaml "${full_dir}/"
-          cp -a deploy/systemd LICENSE VERSION "${agent_dir}/"
-          tar -C dist -czf "dist/${full_name}.tar.gz" "${full_name}"
+          mkdir -p "${agent_dir}"
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "${agent_dir}/monitored-agent" ./cmd/agent
+          cp "${agent_dir}/monitored-agent" "dist/${agent_name}.bin"
+          cp -a LICENSE VERSION "${agent_dir}/"
+          if [[ "${GOOS}" == "linux" ]]; then
+            cp -a deploy/systemd "${agent_dir}/"
+          fi
           tar -C dist -czf "dist/${agent_name}.tar.gz" "${agent_name}"
+          if [[ "${BUILD_FULL}" == "true" ]]; then
+            full_name="monitored_${VERSION}_${GOOS}_${GOARCH}"
+            full_dir="dist/${full_name}"
+            mkdir -p "${full_dir}/bin"
+            go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-server" ./cmd/server
+            go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-worker" ./cmd/worker
+            install -m 0755 "${agent_dir}/monitored-agent" "${full_dir}/bin/monitored-agent"
+            cp -a profiles docs deploy scripts LICENSE VERSION release.env.example compose.release.yaml "${full_dir}/"
+            tar -C dist -czf "dist/${full_name}.tar.gz" "${full_name}"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.bin
           if-no-files-found: error
 
   web:
@@ -242,10 +261,11 @@ jobs:
           set -euo pipefail
           mkdir -p upload
           find downloaded -type f -name '*.tar.gz' -exec cp '{}' upload/ \;
+          find downloaded -type f -name '*.bin' -exec cp '{}' upload/ \;
           cp compose.release.yaml release.env.example upload/
           (
             cd upload
-            sha256sum *.tar.gz compose.release.yaml release.env.example > SHA256SUMS
+            sha256sum *.tar.gz *.bin compose.release.yaml release.env.example > SHA256SUMS
           )
       - name: Publish release
         env:

@@ -6,8 +6,11 @@ services:
       MONITORED_GRPC_CERT_FILE: /run/monitored-pki/server.crt
       MONITORED_GRPC_KEY_FILE: /run/monitored-pki/server.key
       MONITORED_GRPC_CLIENT_CA_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_CA_CERT_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_CA_KEY_FILE: /run/monitored-pki/ca.key
     volumes:
       - ./secrets/pki/ca.crt:/run/monitored-pki/ca.crt:ro
+      - ./secrets/pki/ca.key:/run/monitored-pki/ca.key:ro
       - ./secrets/pki/server.crt:/run/monitored-pki/server.crt:ro
       - ./secrets/pki/server.key:/run/monitored-pki/server.key:ro
 

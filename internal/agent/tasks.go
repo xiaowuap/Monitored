@@ -9,6 +9,7 @@ import (
 
 	monitoredv1 "github.com/monitored-io/monitored/gen/monitored/v1"
 	"github.com/monitored-io/monitored/internal/action"
+	"github.com/monitored-io/monitored/internal/agentupdate"
 	"github.com/monitored-io/monitored/internal/collector"
 	"github.com/monitored-io/monitored/internal/discovery"
 	"github.com/monitored-io/monitored/internal/domain"
@@ -19,6 +20,11 @@ type TaskHandler struct {
 	Actions    *action.Executor
 	Runner     collector.Runner
 	Publish    func(context.Context, domain.IngestBatch) error
+	Updates    UpdateApplier
+}
+
+type UpdateApplier interface {
+	Apply(context.Context, agentupdate.Update) (agentupdate.Result, error)
 }
 
 func (h TaskHandler) Handle(ctx context.Context, envelope *monitoredv1.MasterEnvelope) *monitoredv1.TaskResult {
@@ -50,9 +56,35 @@ func (h TaskHandler) Handle(ctx context.Context, envelope *monitoredv1.MasterEnv
 		return h.diagnose(ctx, envelope.GetDiagnostic())
 	case envelope.GetAction() != nil:
 		return h.execute(ctx, envelope.GetAction())
+	case envelope.GetUpdate() != nil:
+		return h.update(ctx, envelope.GetUpdate())
 	default:
 		return nil
 	}
+}
+
+func (h TaskHandler) update(ctx context.Context, task *monitoredv1.AgentUpdateTask) *monitoredv1.TaskResult {
+	if h.Updates == nil {
+		return &monitoredv1.TaskResult{TaskId: task.TaskId, Status: "failed", Error: "Agent self-update is unavailable"}
+	}
+	result, err := h.Updates.Apply(ctx, agentupdate.Update{
+		TaskID: task.TaskId, PackageID: task.PackageId, Version: task.Version,
+		Strategy: task.Strategy, TargetOS: task.TargetOs, Architecture: task.Architecture,
+		DownloadURL: task.DownloadUrl, SHA256: task.Sha256, SizeBytes: task.SizeBytes,
+		Image: task.Image, ImageDigest: task.ImageDigest,
+	})
+	status := "succeeded"
+	if err != nil {
+		status = "failed"
+	}
+	structured, _ := json.Marshal(result)
+	response := &monitoredv1.TaskResult{
+		TaskId: task.TaskId, Status: status, StructuredJson: string(structured),
+	}
+	if err != nil {
+		response.Error = err.Error()
+	}
+	return response
 }
 
 func (h TaskHandler) scan(ctx context.Context, task *monitoredv1.DiscoveryTask) *monitoredv1.TaskResult {

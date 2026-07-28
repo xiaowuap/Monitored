@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/monitored-io/monitored/internal/agentupdate"
 	"github.com/monitored-io/monitored/internal/domain"
 )
 
@@ -26,7 +28,8 @@ func (r *Repository) RegisterAgent(ctx context.Context, agent domain.Agent) erro
 	if err != nil {
 		return err
 	}
-	_, err = r.pool.Exec(ctx, `
+	var state string
+	err = r.pool.QueryRow(ctx, `
 		INSERT INTO agents (
 			id, stable_host_id, hostname, os, architecture, version, state,
 			certificate_id, capabilities, tools, metadata, last_seen_at
@@ -43,12 +46,49 @@ func (r *Repository) RegisterAgent(ctx context.Context, agent domain.Agent) erro
 			capabilities = EXCLUDED.capabilities,
 			tools = EXCLUDED.tools,
 			metadata = agents.metadata || EXCLUDED.metadata,
-			last_seen_at = now()`,
+			last_update_status = CASE
+				WHEN agents.desired_version <> '' AND agents.desired_version = EXCLUDED.version THEN 'succeeded'
+				ELSE agents.last_update_status
+			END,
+			last_update_at = CASE
+				WHEN agents.desired_version <> '' AND agents.desired_version = EXCLUDED.version THEN now()
+				ELSE agents.last_update_at
+			END,
+			last_update_error = CASE
+				WHEN agents.desired_version <> '' AND agents.desired_version = EXCLUDED.version THEN ''
+				ELSE agents.last_update_error
+			END,
+			last_seen_at = now()
+		WHERE agents.state <> 'revoked'
+		RETURNING state`,
 		agent.ID, agent.StableHostID, agent.Hostname, agent.OS, agent.Architecture,
 		agent.Version, agent.CertificateID, capabilities, tools, metadata,
-	)
+	).Scan(&state)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrConflict
+		}
 		return fmt.Errorf("register agent: %w", err)
+	}
+	if agent.Version != "" {
+		tag, err := r.pool.Exec(ctx, `
+			UPDATE agent_tasks
+			SET state = 'succeeded', acknowledged_at = COALESCE(acknowledged_at, now()),
+				finished_at = now(),
+				result = result || jsonb_build_object('confirmedByRegistration', true, 'version', $2::text)
+			WHERE agent_id = $1 AND kind = 'update'
+			  AND state IN ('queued', 'dispatched', 'acknowledged')
+			  AND payload->>'version' = $2`,
+			agent.ID, agent.Version,
+		)
+		if err != nil {
+			return fmt.Errorf("confirm Agent update registration: %w", err)
+		}
+		if tag.RowsAffected() > 0 {
+			_ = r.AppendAudit(ctx, "agent:"+agent.ID, "agent.update_confirmed", "agent", agent.ID, "", map[string]any{
+				"version": agent.Version, "confirmedBy": "registration",
+			})
+		}
 	}
 	return nil
 }
@@ -110,6 +150,7 @@ func (r *Repository) ListAgents(ctx context.Context, limit int) ([]domain.Agent,
 			CASE WHEN state <> 'revoked' AND last_seen_at < now() - interval '2 minutes' THEN 'offline' ELSE state END,
 			certificate_id, capabilities, tools, metadata, last_seen_at, wal_bytes,
 			oldest_wal_at, last_gap_from, last_gap_to, last_gap_reason, registered_at
+			, desired_version, last_update_status, last_update_at, last_update_error
 		FROM agents ORDER BY last_seen_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
@@ -124,6 +165,7 @@ func (r *Repository) ListAgents(ctx context.Context, limit int) ([]domain.Agent,
 			&item.Version, &item.State, &item.CertificateID, &capabilities, &tools, &metadata,
 			&item.LastSeenAt, &item.WALBytes, &item.OldestWALAt, &item.LastGapFrom,
 			&item.LastGapTo, &item.LastGapReason, &item.RegisteredAt,
+			&item.DesiredVersion, &item.LastUpdateStatus, &item.LastUpdateAt, &item.LastUpdateError,
 		); err != nil {
 			return nil, err
 		}
@@ -135,6 +177,166 @@ func (r *Repository) ListAgents(ctx context.Context, limit int) ([]domain.Agent,
 	return result, rows.Err()
 }
 
+func (r *Repository) QueueAgentUpdate(
+	ctx context.Context,
+	actor, agentID string,
+	update agentupdate.Package,
+	downloadURL string,
+) (domain.AgentTask, error) {
+	payload := map[string]any{
+		"packageId": update.ID, "version": update.Version, "strategy": update.Strategy,
+		"targetOs": update.OS, "architecture": update.Architecture,
+		"downloadUrl": downloadURL, "sha256": update.SHA256, "sizeBytes": update.SizeBytes,
+		"image": update.Image, "imageDigest": update.ImageDigest,
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.AgentTask{}, err
+	}
+	defer tx.Rollback(ctx)
+	var agentOS, architecture, state, lastUpdateStatus string
+	var lastUpdateAt *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT os, architecture, state, last_update_status, last_update_at
+		FROM agents WHERE id = $1 FOR UPDATE`,
+		agentID,
+	).Scan(&agentOS, &architecture, &state, &lastUpdateStatus, &lastUpdateAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.AgentTask{}, ErrNotFound
+		}
+		return domain.AgentTask{}, fmt.Errorf("read Agent update target: %w", err)
+	}
+	restartPending := lastUpdateStatus == "restart_pending" && lastUpdateAt != nil &&
+		lastUpdateAt.After(time.Now().Add(-15*time.Minute))
+	if state == "revoked" || agentOS != update.OS || architecture != update.Architecture || restartPending {
+		return domain.AgentTask{}, ErrConflict
+	}
+	var task domain.AgentTask
+	var rawPayload, rawResult []byte
+	err = tx.QueryRow(ctx, `
+		INSERT INTO agent_tasks (agent_id, kind, payload, expires_at)
+		VALUES ($1, 'update', $2::jsonb, now() + interval '24 hours')
+		RETURNING id::text, agent_id, kind, state, payload, immutable_hash, attempt,
+			not_before, expires_at, dispatched_at, acknowledged_at, finished_at, result, created_at`,
+		agentID, payloadJSON,
+	).Scan(
+		&task.ID, &task.AgentID, &task.Kind, &task.State, &rawPayload, &task.ImmutableHash,
+		&task.Attempt, &task.NotBefore, &task.ExpiresAt, &task.DispatchedAt,
+		&task.AcknowledgedAt, &task.FinishedAt, &rawResult, &task.CreatedAt,
+	)
+	if err != nil {
+		var postgresError *pgconn.PgError
+		if errors.As(err, &postgresError) && postgresError.ConstraintName == "agent_tasks_one_active_update_idx" {
+			return domain.AgentTask{}, ErrConflict
+		}
+		return domain.AgentTask{}, fmt.Errorf("queue Agent update: %w", err)
+	}
+	task.Payload, task.Result = domain.JSONMap(rawPayload), domain.JSONMap(rawResult)
+	if _, err := tx.Exec(ctx, `
+		UPDATE agents SET desired_version = $2, last_update_status = 'queued',
+			last_update_error = '', last_update_at = now()
+		WHERE id = $1`,
+		agentID, update.Version,
+	); err != nil {
+		return domain.AgentTask{}, fmt.Errorf("mark Agent update queued: %w", err)
+	}
+	if err := appendAuditTx(ctx, tx, actor, "agent.update_queued", "agent", agentID, "", map[string]any{
+		"taskId": task.ID, "packageId": update.ID, "version": update.Version,
+		"strategy": update.Strategy, "os": update.OS, "architecture": update.Architecture,
+	}); err != nil {
+		return domain.AgentTask{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.AgentTask{}, err
+	}
+	return task, nil
+}
+
+func (r *Repository) CreateAgentEnrollmentToken(
+	ctx context.Context,
+	actor, agentID string,
+	tokenHash []byte,
+	expiresAt time.Time,
+) error {
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO agent_enrollment_tokens (token_hash, agent_id, requested_by, expires_at)
+		VALUES ($1, $2, $3, $4)`,
+		tokenHash, agentID, actor, expiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create agent enrollment token: %w", err)
+	}
+	_ = r.AppendAudit(ctx, actor, "agent.enrollment_token_created", "agent", agentID, "", map[string]any{
+		"expiresAt": expiresAt,
+	})
+	return nil
+}
+
+func (r *Repository) ConsumeAgentEnrollmentToken(
+	ctx context.Context,
+	agentID string,
+	tokenHash []byte,
+	remoteAddress string,
+) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE agent_enrollment_tokens
+		SET used_at = now()
+		WHERE token_hash = $1 AND agent_id = $2
+		  AND used_at IS NULL AND expires_at > now()`,
+		tokenHash, agentID,
+	)
+	if err != nil {
+		return fmt.Errorf("consume agent enrollment token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	_ = r.AppendAudit(ctx, "agent:"+agentID, "agent.enrolled", "agent", agentID, remoteAddress, map[string]any{
+		"credential": "short-lived-mtls",
+	})
+	return nil
+}
+
+func (r *Repository) ValidateAgentEnrollmentToken(
+	ctx context.Context,
+	agentID string,
+	tokenHash []byte,
+) error {
+	var valid bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM agent_enrollment_tokens
+			WHERE token_hash = $1 AND agent_id = $2
+			  AND used_at IS NULL AND expires_at > now()
+		)`,
+		tokenHash, agentID,
+	).Scan(&valid); err != nil {
+		return fmt.Errorf("validate agent enrollment token: %w", err)
+	}
+	if !valid {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) AuthorizeAgentCertificateRenewal(ctx context.Context, agentID string) error {
+	var allowed bool
+	if err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM agents WHERE id = $1 AND state <> 'revoked'
+		)`,
+		agentID,
+	).Scan(&allowed); err != nil {
+		return fmt.Errorf("authorize agent certificate renewal: %w", err)
+	}
+	if !allowed {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (r *Repository) NextAgentTasks(ctx context.Context, agentID string, limit int) ([]domain.AgentTask, error) {
 	if limit <= 0 || limit > 20 {
 		limit = 10
@@ -144,10 +346,28 @@ func (r *Repository) NextAgentTasks(ctx context.Context, agentID string, limit i
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `
+		UPDATE agent_tasks
+		SET state = 'expired', finished_at = now(),
+			result = result || '{"error":"task expired before completion"}'::jsonb
+		WHERE agent_id = $1 AND state IN ('queued', 'dispatched', 'acknowledged')
+		  AND expires_at <= now()`,
+		agentID,
+	); err != nil {
+		return nil, fmt.Errorf("expire Agent tasks: %w", err)
+	}
 	rows, err := tx.Query(ctx, `
 		WITH selected AS (
 			SELECT id, payload FROM agent_tasks
-			WHERE agent_id = $1 AND state = 'queued'
+			WHERE agent_id = $1
+			  AND (
+			    state = 'queued'
+			    OR (
+			      state = 'dispatched' AND kind = 'update'
+			      AND dispatched_at < now() - interval '1 hour'
+			      AND attempt < 3
+			    )
+			  )
 			  AND not_before <= now() AND expires_at > now()
 			ORDER BY created_at
 			LIMIT $2
@@ -197,6 +417,13 @@ func (r *Repository) NextAgentTasks(ctx context.Context, agentID string, limit i
 			}
 		}
 		if task.Kind != "action" {
+			if task.Kind == "update" {
+				if _, err := tx.Exec(ctx, `
+						UPDATE agents SET last_update_status = 'dispatched', last_update_at = now()
+						WHERE id = $1`, agentID); err != nil {
+					return nil, fmt.Errorf("mark Agent update dispatched: %w", err)
+				}
+			}
 			continue
 		}
 		actionRequestID, _ := task.Payload["actionRequestId"].(string)
@@ -320,7 +547,47 @@ func (r *Repository) CompleteAgentTask(ctx context.Context, agentID, taskID, sta
 			return err
 		}
 	}
+	if kind == "update" {
+		var payload map[string]any
+		if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+			return fmt.Errorf("decode completed Agent update task: %w", err)
+		}
+		version, _ := payload["version"].(string)
+		updateStatus := status
+		lastError, _ := result["error"].(string)
+		if status == "succeeded" {
+			structured := map[string]any{}
+			if raw, ok := result["structured"].(string); ok && raw != "" {
+				_ = json.Unmarshal([]byte(raw), &structured)
+			}
+			switch {
+			case boolValue(structured["restartScheduled"]):
+				updateStatus = "restart_pending"
+			case boolValue(structured["activationPending"]):
+				updateStatus = "staged"
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE agents
+			SET desired_version = $2, last_update_status = $3,
+				last_update_at = now(), last_update_error = $4
+			WHERE id = $1`,
+			agentID, version, updateStatus, lastError,
+		); err != nil {
+			return fmt.Errorf("complete Agent update status: %w", err)
+		}
+		if err := appendAuditTx(ctx, tx, "agent:"+agentID, "agent.update_"+updateStatus, "agent", agentID, "", map[string]any{
+			"taskId": taskID, "version": version,
+		}); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func boolValue(value any) bool {
+	result, _ := value.(bool)
+	return result
 }
 
 func integerFromJSON(value any) int {

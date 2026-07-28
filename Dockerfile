@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.7
+FROM docker:27-cli AS docker-cli
+
 FROM golang:1.23-alpine AS base
 WORKDIR /src
 RUN apk add --no-cache ca-certificates
@@ -17,7 +19,8 @@ ARG TARGETARCH
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker \
- && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/agent ./cmd/agent
+ && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/agent ./cmd/agent \
+ && mkdir -p /out/update-cache
 
 FROM golang:1.23-bookworm AS agent-build
 WORKDIR /src
@@ -37,6 +40,7 @@ LABEL org.opencontainers.image.source="https://github.com/xiaowuap/Monitored" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.title="Monitored Server"
 COPY --from=build /out/server /server
+COPY --chown=65532:65532 --from=build /out/update-cache /var/lib/monitored/update-cache
 EXPOSE 8080
 ENTRYPOINT ["/server"]
 
@@ -62,6 +66,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates ethtool ipmitool iproute2 smartmontools \
  && rm -rf /var/lib/apt/lists/*
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=agent-build /out/agent /agent
 USER 65532:65532
 ENTRYPOINT ["/agent"]

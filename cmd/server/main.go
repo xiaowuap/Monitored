@@ -14,6 +14,7 @@ import (
 	"github.com/monitored-io/monitored/internal/config"
 	"github.com/monitored-io/monitored/internal/grpcapi"
 	"github.com/monitored-io/monitored/internal/httpapi"
+	"github.com/monitored-io/monitored/internal/security"
 	"github.com/monitored-io/monitored/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -69,9 +70,24 @@ func main() {
 	cancelStartup()
 	defer repository.Close()
 
+	var agentIssuer security.AgentCertificateIssuer
+	if cfg.AgentCAKeyFile != "" {
+		issuer, issuerErr := security.LoadAgentIssuer(
+			cfg.AgentCACertFile,
+			cfg.AgentCAKeyFile,
+			cfg.AgentCertificateTTL,
+		)
+		if issuerErr != nil {
+			logger.Error("configure Agent certificate issuer", "error", issuerErr)
+			os.Exit(1)
+		}
+		agentIssuer = issuer
+		logger.Info("automatic Agent enrollment and certificate rotation enabled", "certificateTTL", cfg.AgentCertificateTTL)
+	}
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(repository, cfg, logger),
+		Handler:           httpapi.New(repository, cfg, logger, agentIssuer),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      90 * time.Second,
@@ -87,7 +103,7 @@ func main() {
 			logger.Error("listen for Agent gRPC", "error", listenErr)
 			os.Exit(1)
 		}
-		service := grpcapi.New(repository, cfg.GRPCInsecure)
+		service := grpcapi.New(repository, cfg.GRPCInsecure, agentIssuer)
 		rpcServer, createErr := grpcapi.NewServer(service, cfg.GRPCCertFile, cfg.GRPCKeyFile, cfg.GRPCClientCA, cfg.GRPCInsecure)
 		if createErr != nil {
 			logger.Error("configure Agent gRPC", "error", createErr)
