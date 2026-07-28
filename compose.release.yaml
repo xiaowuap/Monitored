@@ -89,6 +89,9 @@ services:
 
   web:
     image: ${MONITORED_WEB_IMAGE:-ghcr.io/xiaowuap/monitored-web}:${MONITORED_VERSION}
+    environment:
+      MONITORED_WEB_REQUIRE_AUTH: "true"
+      MONITORED_API_INTERNAL_URL: http://server:8080
     depends_on:
       server:
         condition: service_healthy

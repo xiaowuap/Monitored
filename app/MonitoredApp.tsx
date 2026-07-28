@@ -27,6 +27,7 @@ import {
   Info,
   Languages,
   LayoutDashboard,
+  LogOut,
   LockKeyhole,
   Mail,
   Menu,
@@ -130,18 +131,53 @@ const configuredMode: RuntimeMode =
 const allowRuntimeSwitch =
   process.env.NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH === "true";
 
+type AuthUser = {
+  email: string;
+  role: string;
+};
+
+class APIError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "APIError";
+  }
+}
+
+function redirectToLogin() {
+  if (typeof window === "undefined" || window.location.pathname === "/login") {
+    return;
+  }
+  const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  window.location.replace(`/login?next=${encodeURIComponent(returnTo)}`);
+}
+
+async function apiRequest(path: string, init?: RequestInit): Promise<Response> {
+  if (!apiBase) {
+    throw new Error("Live Mode requires NEXT_PUBLIC_API_BASE");
+  }
+  const response = await fetch(`${apiBase}${path}`, {
+    ...init,
+    credentials: "include",
+  });
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new APIError("Authentication is required", response.status);
+  }
+  if (!response.ok) {
+    throw new APIError(`Master returned ${response.status}`, response.status);
+  }
+  return response;
+}
+
 async function getOverview(mode: RuntimeMode): Promise<OverviewData> {
   if (mode === "demo") {
     await new Promise((resolve) => setTimeout(resolve, 280));
     return overviewData;
   }
-  if (!apiBase) {
-    throw new Error("Live Mode requires NEXT_PUBLIC_API_BASE");
-  }
-  const response = await fetch(`${apiBase}/overview`, {
-    credentials: "include",
-  });
-  if (!response.ok) throw new Error("overview unavailable");
+  const response = await apiRequest("/overview");
   const value = (await response.json()) as {
     healthScore: number;
     assetCount: number;
@@ -168,17 +204,20 @@ async function getOverview(mode: RuntimeMode): Promise<OverviewData> {
 
 async function postAPI(path: string, body: unknown, mode: RuntimeMode) {
   if (mode === "demo") return;
-  if (!apiBase) throw new Error("Live Mode requires NEXT_PUBLIC_API_BASE");
-  const response = await fetch(`${apiBase}${path}`, {
+  await apiRequest(path, {
     method: "POST",
-    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`Request failed with ${response.status}`);
 }
 
-function MonitoredShell() {
+function MonitoredShell({
+  user,
+  onLogout,
+}: {
+  user: AuthUser | null;
+  onLogout: (() => void) | null;
+}) {
   const { t } = useTranslation();
   const [page, setPage] = useState<Page>("overview");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(() => {
@@ -402,6 +441,8 @@ function MonitoredShell() {
           runtimeMode={runtimeMode}
           canSwitchRuntime={allowRuntimeSwitch}
           onRuntimeMode={changeRuntimeMode}
+          user={user}
+          onLogout={onLogout}
         />
 
         <div className="page-canvas">
@@ -568,9 +609,89 @@ export default function MonitoredApp() {
   return (
     <I18nextProvider i18n={i18n}>
       <QueryClientProvider client={queryClient}>
-        <MonitoredShell />
+        {configuredMode === "live" ? (
+          <AuthenticatedShell />
+        ) : (
+          <MonitoredShell user={null} onLogout={null} />
+        )}
       </QueryClientProvider>
     </I18nextProvider>
+  );
+}
+
+function AuthenticatedShell() {
+  const authQuery = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: async () => {
+      const response = await apiRequest("/auth/me");
+      return (await response.json()) as {
+        user: AuthUser;
+        authDisabled: boolean;
+      };
+    },
+    retry: (failureCount, error) =>
+      !(error instanceof APIError && error.status === 401) && failureCount < 1,
+    staleTime: 60_000,
+  });
+
+  const logout = async () => {
+    try {
+      if (apiBase) {
+        await fetch(`${apiBase}/auth/logout`, {
+          method: "POST",
+          credentials: "include",
+        });
+      }
+    } finally {
+      queryClient.clear();
+      window.location.replace("/login");
+    }
+  };
+
+  if (
+    authQuery.isLoading ||
+    (authQuery.error instanceof APIError && authQuery.error.status === 401)
+  ) {
+    return (
+      <div className="auth-loading" role="status">
+        <div className="brand-mark" aria-hidden="true">
+          <Activity size={20} strokeWidth={2.4} />
+        </div>
+        <strong>正在验证会话</strong>
+        <span>正在连接 Monitored Master…</span>
+      </div>
+    );
+  }
+
+  if (authQuery.isError) {
+    return (
+      <div className="auth-loading auth-loading-error" role="alert">
+        <AlertTriangle size={22} />
+        <strong>认证服务暂时不可用</strong>
+        <span>Master 可以访问，但会话验证失败。请稍后重试。</span>
+        <button
+          className="button secondary"
+          onClick={() => void authQuery.refetch()}
+        >
+          <RefreshCw size={15} /> 重试
+        </button>
+      </div>
+    );
+  }
+
+  if (!authQuery.data) {
+    return (
+      <div className="auth-loading" role="status">
+        <strong>正在准备控制台</strong>
+      </div>
+    );
+  }
+
+  return (
+    <MonitoredShell
+      user={authQuery.data.user}
+      onLogout={() => void logout()}
+    />
   );
 }
 
@@ -763,6 +884,8 @@ function Topbar({
   runtimeMode,
   canSwitchRuntime,
   onRuntimeMode,
+  user,
+  onLogout,
 }: {
   title: string;
   onMenu: () => void;
@@ -773,6 +896,8 @@ function Topbar({
   runtimeMode: RuntimeMode;
   canSwitchRuntime: boolean;
   onRuntimeMode: (mode: RuntimeMode) => void;
+  user: AuthUser | null;
+  onLogout: (() => void) | null;
 }) {
   const { t } = useTranslation();
   return (
@@ -822,9 +947,14 @@ function Topbar({
           <ScanSearch size={16} />
           <span>{t("discoverNow")}</span>
         </button>
-        <button className="avatar-button" aria-label="用户菜单">
-          <span>林</span>
-          <ChevronDown size={14} />
+        <button
+          className="avatar-button"
+          aria-label={onLogout ? "退出登录" : "用户菜单"}
+          title={onLogout ? `${user?.email ?? ""} · 退出登录` : undefined}
+          onClick={onLogout ?? undefined}
+        >
+          <span>{user?.email.slice(0, 1).toUpperCase() ?? "林"}</span>
+          {onLogout ? <LogOut size={14} /> : <ChevronDown size={14} />}
         </button>
       </div>
     </header>
@@ -2081,9 +2211,7 @@ function LiveResourcePage({ page }: { page: Exclude<Page, "overview"> }) {
   const query = useQuery({
     queryKey: ["live-resource", page],
     queryFn: async () => {
-      if (!apiBase) throw new Error("NEXT_PUBLIC_API_BASE is not configured");
-      const response = await fetch(`${apiBase}${selected.path}`, { credentials: "include" });
-      if (!response.ok) throw new Error(`Master returned ${response.status}`);
+      const response = await apiRequest(selected.path);
       const payload = (await response.json()) as { items?: Array<Record<string, unknown>> };
       const rows = payload.items ?? [];
       return selected.kinds

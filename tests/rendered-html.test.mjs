@@ -45,7 +45,12 @@ test("standalone production bundle contains Monitored product metadata", async (
 
   assert.equal(response.status, 200);
   assert.match(html, /Monitored/);
-  assert.match(html, /设备遥测优先/);
-  assert.match(html, /DEMO MODE/);
+  if (process.env.MONITORED_WEB_REQUIRE_AUTH === "true") {
+    assert.match(response.url, /\/login\?next=%2F$/);
+    assert.match(html, /登录控制台/);
+  } else {
+    assert.match(html, /设备遥测优先/);
+    assert.match(html, /DEMO MODE/);
+  }
   assert.doesNotMatch(html, /Your site is taking shape/);
 });
