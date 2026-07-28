@@ -1,0 +1,30 @@
+[Unit]
+Description=Monitored host telemetry agent
+Documentation=https://github.com/xiaowuap/Monitored
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/monitored/agent.env
+ExecStart=/usr/local/bin/monitored-agent
+Restart=on-failure
+RestartSec=5s
+StateDirectory=monitored-agent
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/monitored-agent
+
+[Install]
+WantedBy=multi-user.target

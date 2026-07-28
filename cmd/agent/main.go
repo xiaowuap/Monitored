@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,13 +20,17 @@ import (
 	"github.com/monitored-io/monitored/internal/domain"
 )
 
-const version = "0.2.0-dev"
+var version = "dev"
 
 type sender interface {
 	Send(context.Context, domain.IngestBatch) error
 }
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Printf("monitored-agent %s\n", version)
+		return
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.AgentFromEnvironment()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

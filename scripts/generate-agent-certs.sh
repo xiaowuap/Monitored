@@ -4,6 +4,7 @@ set -eu
 output_dir="${1:-./secrets/pki}"
 agent_id="${2:-local-agent}"
 server_name="${3:-server}"
+server_sans="${4:-DNS:${server_name},DNS:localhost,IP:127.0.0.1}"
 
 if ! command -v openssl >/dev/null 2>&1; then
   echo "openssl is required" >&2
@@ -28,7 +29,7 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${output_di
 openssl req -new -sha256 \
   -key "${output_dir}/server.key" \
   -subj "/CN=${server_name}" \
-  -addext "subjectAltName=DNS:${server_name},DNS:localhost,IP:127.0.0.1" \
+  -addext "subjectAltName=${server_sans}" \
   -out "${output_dir}/server.csr"
 openssl x509 -req -sha256 -days 825 \
   -in "${output_dir}/server.csr" \

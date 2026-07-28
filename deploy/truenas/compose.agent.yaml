@@ -1,0 +1,31 @@
+name: monitored-agent
+
+services:
+  agent:
+    image: ${MONITORED_AGENT_IMAGE:-ghcr.io/xiaowuap/monitored-agent}:${MONITORED_VERSION}
+    user: "0:0"
+    cap_add:
+      - SYS_RAWIO
+    environment:
+      MONITORED_AGENT_PROTOCOL: grpc
+      MONITORED_GRPC_TARGET: ${MONITORED_GRPC_TARGET}
+      MONITORED_AGENT_NAME: ${MONITORED_AGENT_NAME}
+      MONITORED_AGENT_GRPC_INSECURE: "false"
+      MONITORED_AGENT_TLS_CERT_FILE: /run/monitored-pki/agent.crt
+      MONITORED_AGENT_TLS_KEY_FILE: /run/monitored-pki/agent.key
+      MONITORED_AGENT_TLS_CA_FILE: /run/monitored-pki/ca.crt
+      MONITORED_AGENT_TLS_SERVER_NAME: ${MONITORED_AGENT_TLS_SERVER_NAME:-server}
+      MONITORED_AGENT_INTERVAL: ${MONITORED_AGENT_INTERVAL:-10s}
+      MONITORED_SMART_INTERVAL: ${MONITORED_SMART_INTERVAL:-5m}
+      MONITORED_WAL_PATH: /var/lib/monitored-agent/wal.ndjson
+      MONITORED_SYS_ROOT: /host
+      MONITORED_DEVICE_ROOT: /dev
+      MONITORED_ALLOW_ROOT_ACTIONS: "false"
+      MONITORED_TRUENAS_ENDPOINT: ${MONITORED_TRUENAS_ENDPOINT:-}
+      MONITORED_TRUENAS_TOKEN: ${MONITORED_TRUENAS_TOKEN:-}
+    volumes:
+      - /sys:/host/sys:ro
+      - /etc/machine-id:/host/etc/machine-id:ro
+      - ./data:/var/lib/monitored-agent
+      - ./pki:/run/monitored-pki:ro
+    restart: unless-stopped

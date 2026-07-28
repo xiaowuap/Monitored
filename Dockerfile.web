@@ -2,12 +2,14 @@
 FROM node:24-alpine AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
-ARG NEXT_PUBLIC_API_BASE=http://localhost:8080/api/v1
+ARG NEXT_PUBLIC_API_BASE=/api/v1
 ENV NEXT_PUBLIC_API_BASE=${NEXT_PUBLIC_API_BASE}
 ARG NEXT_PUBLIC_MONITORED_MODE=live
 ENV NEXT_PUBLIC_MONITORED_MODE=${NEXT_PUBLIC_MONITORED_MODE}
 ARG NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH=false
 ENV NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH=${NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH}
+ARG MONITORED_API_INTERNAL_URL=http://server:8080
+ENV MONITORED_API_INTERNAL_URL=${MONITORED_API_INTERNAL_URL}
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit
 COPY . .
@@ -15,6 +17,10 @@ RUN npm run build
 
 FROM node:24-alpine
 WORKDIR /app
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/xiaowuap/Monitored" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.title="Monitored Web"
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV HOSTNAME=0.0.0.0

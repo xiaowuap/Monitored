@@ -1,0 +1,252 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "SemVer tag to release, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate version
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate tag and source versions
+        id: version
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${REQUESTED_TAG:-${GITHUB_REF_NAME}}"
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: ${tag}" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          source_version="$(tr -d '[:space:]' < VERSION)"
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "${source_version}" != "${version}" ]]; then
+            echo "VERSION is ${source_version}, expected ${version}" >&2
+            exit 1
+          fi
+          if [[ "${package_version}" != "${version}" ]]; then
+            echo "package.json is ${package_version}, expected ${version}" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: Release checks
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          package-manager-cache: false
+      - name: Go checks
+        run: |
+          go test ./...
+          CGO_ENABLED=0 go test ./...
+          go vet ./...
+      - name: Web checks
+        run: |
+          npm ci --ignore-scripts --no-audit
+          npm test
+          npm run lint
+          npx tsc --noEmit
+
+  binaries:
+    name: Linux binaries / ${{ matrix.arch }}
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build archives
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          full_name="monitored_${VERSION}_linux_${GOARCH}"
+          agent_name="monitored-agent_${VERSION}_linux_${GOARCH}"
+          full_dir="dist/${full_name}"
+          agent_dir="dist/${agent_name}"
+          mkdir -p "${full_dir}/bin" "${agent_dir}"
+          go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-server" ./cmd/server
+          go build -trimpath -ldflags="-s -w" -o "${full_dir}/bin/monitored-worker" ./cmd/worker
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "${full_dir}/bin/monitored-agent" ./cmd/agent
+          install -m 0755 "${full_dir}/bin/monitored-agent" "${agent_dir}/monitored-agent"
+          cp -a profiles docs deploy scripts LICENSE VERSION release.env.example compose.release.yaml "${full_dir}/"
+          cp -a deploy/systemd LICENSE VERSION "${agent_dir}/"
+          tar -C dist -czf "dist/${full_name}.tar.gz" "${full_name}"
+          tar -C dist -czf "dist/${agent_name}.tar.gz" "${agent_name}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  web:
+    name: Web standalone
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          package-manager-cache: false
+      - name: Build archive
+        env:
+          NEXT_PUBLIC_API_BASE: /api/v1
+          NEXT_PUBLIC_MONITORED_MODE: live
+          NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH: "false"
+          MONITORED_API_INTERNAL_URL: http://127.0.0.1:8080
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit
+          npm run build
+          name="monitored-web_${VERSION}_linux_amd64"
+          stage="dist/${name}"
+          mkdir -p "${stage}/.next"
+          cp -a .next/standalone/. "${stage}/"
+          cp -a .next/static "${stage}/.next/static"
+          cp -a public "${stage}/public"
+          cp LICENSE VERSION "${stage}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  images:
+    name: Image / ${{ matrix.name }}
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: server
+            image: monitored-server
+            dockerfile: Dockerfile
+            target: server
+          - name: worker
+            image: monitored-worker
+            dockerfile: Dockerfile
+            target: worker
+          - name: agent
+            image: monitored-agent
+            dockerfile: Dockerfile
+            target: agent
+          - name: web
+            image: monitored-web
+            dockerfile: Dockerfile.web
+            target: ""
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ needs.prepare.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            NEXT_PUBLIC_API_BASE=/api/v1
+            NEXT_PUBLIC_MONITORED_MODE=live
+            NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH=false
+            MONITORED_API_INTERNAL_URL=http://server:8080
+          cache-from: type=gha,scope=release-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
+          provenance: mode=max
+          sbom: true
+
+  github-release:
+    name: GitHub Release
+    needs: [prepare, binaries, web, images]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          path: downloaded
+      - name: Collect and checksum assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          find downloaded -type f -name '*.tar.gz' -exec cp '{}' upload/ \;
+          cp compose.release.yaml release.env.example upload/
+          (
+            cd upload
+            sha256sum *.tar.gz compose.release.yaml release.env.example > SHA256SUMS
+          )
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" upload/* --clobber
+          else
+            gh release create "${TAG}" upload/* \
+              --target "${GITHUB_SHA}" \
+              --title "Monitored ${VERSION}" \
+              --generate-notes
+          fi

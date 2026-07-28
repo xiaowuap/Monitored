@@ -39,6 +39,35 @@ Web 默认端口 3000、REST 8080、Agent gRPC 9443。PostgreSQL/Redis 默认不
 
 Worker 的 TrueNAS/Redfish/IPMI/NUT/SNMP/SSH/HTTP/TCP 连接无需额外容器；配置见 [连接配置](connections.md)。OpenAI-compatible/Ollama 为可选本地或外部 provider，见 [LLM](llm.md)。
 
+## Release 安装
+
+`v*` tag 会触发 GitHub Release 工作流。工作流先执行 Go/Web 全量检查，再生成
+amd64/arm64 Linux 二进制包、Web standalone 包、SHA256 校验和，并向 GHCR 发布
+server、worker、web 和 agent 多架构镜像。
+
+下载 Release 中的 `compose.release.yaml` 与 `release.env.example`：
+
+```bash
+cp release.env.example .env
+# 修改 .env 中的所有 replace-with 值、公开 URL 和持久化目录
+docker compose --env-file .env -f compose.release.yaml pull
+docker compose --env-file .env -f compose.release.yaml up -d
+curl http://localhost:8080/healthz
+```
+
+官方 GHCR 镜像为 public，可匿名拉取。升级时先把 `.env` 的
+`MONITORED_VERSION` 改为目标 Release 版本，再执行：
+
+```bash
+./scripts/update-release.sh .env compose.release.yaml
+```
+
+生产数据目录与 PKI 目录必须位于持久化存储，并保持私钥仅对 root 可读。
+
+远程 Linux Agent 使用 Release 中对应架构的 `monitored-agent_*` 包、
+`deploy/systemd/monitored-agent.service` 和独立的 mTLS 身份。每台主机的
+`MONITORED_AGENT_NAME` 必须唯一，并保持 `MONITORED_ALLOW_ROOT_ACTIONS=false`。
+
 ## 生产 mTLS
 
 按 [Agent mTLS](agent-mtls.md) 配置证书。Compose 自带 `compose.mtls.yaml` 作为文件挂载示例：

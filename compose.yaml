@@ -39,6 +39,7 @@ services:
       target: server
       args:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        VERSION: ${MONITORED_VERSION:-dev}
     environment:
       <<: *common-env
       MONITORED_HTTP_ADDR: ${MONITORED_HTTP_ADDR:-:8080}
@@ -74,6 +75,7 @@ services:
       target: worker
       args:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        VERSION: ${MONITORED_VERSION:-dev}
     environment:
       <<: *common-env
       MONITORED_WORKER_INTERVAL: ${MONITORED_WORKER_INTERVAL:-1m}
@@ -97,9 +99,10 @@ services:
       context: .
       dockerfile: Dockerfile.web
       args:
-        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8080/api/v1}
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-/api/v1}
         NEXT_PUBLIC_MONITORED_MODE: live
         NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH: ${NEXT_PUBLIC_ALLOW_RUNTIME_SWITCH:-false}
+        MONITORED_API_INTERNAL_URL: http://server:8080
     depends_on:
       - server
     ports:
@@ -113,6 +116,7 @@ services:
       target: agent
       args:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        VERSION: ${MONITORED_VERSION:-dev}
     environment:
       MONITORED_SERVER_URL: http://server:8080
       MONITORED_AGENT_PROTOCOL: ${MONITORED_AGENT_PROTOCOL:-grpc}
