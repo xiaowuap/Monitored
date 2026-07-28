@@ -223,6 +223,7 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           path: downloaded
+          pattern: "!*.dockerbuild"
       - name: Collect and checksum assets
         shell: bash
         run: |
