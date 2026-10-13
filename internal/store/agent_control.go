@@ -623,6 +623,8 @@ func (r *Repository) ApplyDiscoverySnapshot(ctx context.Context, runID, agentID 
 		VALUES (NULLIF($1, '')::uuid, $2, $3::jsonb)`, runID, agentID, observedJSON); err != nil {
 		return fmt.Errorf("store discovery snapshot: %w", err)
 	}
+	// Removed sensors are a terminal missing state until ingestion sees them
+	// again and resets their lifecycle. Do not rewrite them on every scan.
 	if _, err := tx.Exec(ctx, `
 		WITH observed AS (
 			SELECT jsonb_array_elements_text($2::jsonb) stable_id
@@ -638,6 +640,7 @@ func (r *Repository) ApplyDiscoverySnapshot(ctx context.Context, runID, agentID 
 		FROM assets asset
 		WHERE sensor.asset_id = asset.id
 		  AND asset.metadata->>'agentId' = $1
+		  AND (sensor.missing_discoveries < 6 OR sensor.discovery_status <> 'removed')
 		  AND NOT EXISTS (SELECT 1 FROM observed WHERE observed.stable_id = sensor.stable_id)`,
 		agentID, observedJSON,
 	); err != nil {

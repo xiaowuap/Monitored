@@ -70,7 +70,7 @@ func (r *Repository) Ingest(ctx context.Context, batch domain.IngestBatch) error
 				return fmt.Errorf("resolve parent asset %s: %w", asset.ParentStableID, err)
 			}
 		}
-		if _, err = tx.Exec(ctx, `UPDATE assets SET parent_id = $2::uuid WHERE id = $1::uuid`, childID, parentID); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE assets SET parent_id = $2::uuid WHERE id = $1::uuid AND parent_id IS DISTINCT FROM $2::uuid`, childID, parentID); err != nil {
 			return fmt.Errorf("link parent asset: %w", err)
 		}
 	}
@@ -211,6 +211,10 @@ func (r *Repository) RunMaintenance(ctx context.Context) error {
 	}
 	defer tx.Rollback(ctx)
 
+	// Recompute the existing late-arrival windows, but only create a new row
+	// version when aggregate values change. Unconditional conflict updates
+	// generated WAL and vacuum work for every historical bucket each minute.
+
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO metric_1m (
 			series_id, bucket, min_value, avg_value, max_value,
@@ -236,7 +240,9 @@ func (r *Repository) RunMaintenance(ctx context.Context) error {
 			max_value = EXCLUDED.max_value,
 			sample_count = EXCLUDED.sample_count,
 			first_value = EXCLUDED.first_value,
-			last_value = EXCLUDED.last_value`); err != nil {
+			last_value = EXCLUDED.last_value
+		WHERE ROW(metric_1m.min_value,metric_1m.avg_value,metric_1m.max_value,metric_1m.sample_count,metric_1m.first_value,metric_1m.last_value)
+			IS DISTINCT FROM ROW(EXCLUDED.min_value,EXCLUDED.avg_value,EXCLUDED.max_value,EXCLUDED.sample_count,EXCLUDED.first_value,EXCLUDED.last_value)`); err != nil {
 		return fmt.Errorf("downsample metrics to 1m: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `
@@ -263,7 +269,9 @@ func (r *Repository) RunMaintenance(ctx context.Context) error {
 			max_value = EXCLUDED.max_value,
 			sample_count = EXCLUDED.sample_count,
 			first_value = EXCLUDED.first_value,
-			last_value = EXCLUDED.last_value`); err != nil {
+			last_value = EXCLUDED.last_value
+		WHERE ROW(metric_1h.min_value,metric_1h.avg_value,metric_1h.max_value,metric_1h.sample_count,metric_1h.first_value,metric_1h.last_value)
+			IS DISTINCT FROM ROW(EXCLUDED.min_value,EXCLUDED.avg_value,EXCLUDED.max_value,EXCLUDED.sample_count,EXCLUDED.first_value,EXCLUDED.last_value)`); err != nil {
 		return fmt.Errorf("downsample metrics to 1h: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM metric_samples WHERE recorded_at < now() - interval '7 days'`); err != nil {
